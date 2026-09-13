@@ -17,7 +17,7 @@
                 "api_id": 37965026,
                 "api_hash": "24ccd7aff0fbf93babff9bd12eadb6bb",
                 "target_bot": [
-                    "PayGoeasy_bot"
+                    "tasklyBux_bot"
                                     ],
                 "session_name": "taskly_session_8801648266488"
             },
@@ -26,7 +26,7 @@
                 "api_id": 30276249,
                 "api_hash": "053b4de80192025a3089b0af9abbcb66",
                 "target_bot": [
-                    "PayGoeasy_bot"
+                    "tasklyBux_bot"
                 ],
                 "session_name": "taskly_session_8801580861138"
             },
@@ -35,7 +35,7 @@
                 "api_id": 20602218,
                 "api_hash": "ea359e35ec21d96c243bc87c673283f9",
                 "target_bot": [
-                    "PayGoeasy_bot"
+                    "tasklyBux_bot"
                 ],
                 "session_name": "taskly_session_8801789237910"
             },
@@ -44,7 +44,7 @@
                 "api_id": 30026453,
                 "api_hash": "8e5e438b759599cd6d35717a96a5c009",
                 "target_bot": [
-                    "PayGoeasy_bot"
+                    "tasklyBux_bot"
                 ],
                 "session_name": "taskly_session_8801568690722"
             },
@@ -53,7 +53,7 @@
                 "api_id": 31977748,
                 "api_hash": "f884c9f3d1762441b8d8f89a980ee2d6",
                 "target_bot": [
-                    "PayGoeasy_bot"
+                    "tasklyBux_bot"
                 ],
                 "session_name": "taskly_session_8801970429988"
             }
