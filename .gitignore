@@ -38,6 +38,11 @@ temp/
 tmp/
 Crashpad/
 
+# Images & media assets
+images/
+*/images/
+
+
 # Virtual environments
 venv/
 .venv/
