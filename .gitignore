@@ -1,0 +1,51 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Chrome profiles & user data directories
+chrome_profile/
+chrome_profiles/
+chrome_profile_taskly/
+*chrome_profile*/
+*chrome_profiles*/
+profile_*/
+*/profile_*
+
+# Telegram & session credentials
+*.session
+*.session-journal
+taskly_session_*.session
+taskly_user_session.session
+
+# Google / API credentials & secrets
+service_account.json
+*/service_account.json
+.env
+*.pem
+*.key
+
+# Compressed archives
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Logs & temp files
+*.log
+logs/
+temp/
+tmp/
+Crashpad/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDE / Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
