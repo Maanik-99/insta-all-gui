@@ -4,6 +4,11 @@
     "headless": false,
     "viewport_width": 500,
     "viewport_height": 700,
+    "email_services": {
+        "mail_td": false,
+        "mail_cx": true,
+        "ninja": true
+    },
     "telegram": {
         "target_bot": [
             "tasklyBux_bot",

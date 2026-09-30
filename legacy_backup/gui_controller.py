@@ -1,40 +1,12 @@
-"""
-==============================================================================
-🔥 INSTA AUTOMATION MULTI-INSTANCE GUI CONTROLLER & DASHBOARD 🔥
-==============================================================================
-- Instant Startup (<0.5s GUI Launch)
-- Accurate Emulator Detection (Filters out physical USB phones)
-- Independent Per-Instance Controls: Start, Stop, Restart
-- Global Master Controls: Start All, Stop All, Restart All, Refresh
-- Simplified, Human-Friendly Real-Time Log Boxes per Instance
-==============================================================================
-"""
-
-import asyncio
-import os
-import queue
-import re
 import sys
-import threading
-import time
-from datetime import datetime
-from typing import Dict, Optional, List
+import os
 
-import customtkinter as ctk
+# Redirect directly to new high-performance, emulator-aware GUI
+from insta_emulator_gui import main
 
-# Core imports
-import importlib.util
-OPTIMIZE_SCRIPT_PATH = os.path.join(os.path.dirname(__file__), "1tasklytometatoinsta_multi_optimize.py")
-spec = importlib.util.spec_from_file_location("optimize_runner", OPTIMIZE_SCRIPT_PATH)
-optimize_runner = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(optimize_runner)
+if __name__ == "__main__":
+    main()
 
-# Appearance
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("blue")
-
-# Global Event Queue for Thread-Safe GUI Updates
-GUI_LOG_QUEUE = queue.Queue()
 
 
 def simplify_log_message(tag: str, raw_msg: str) -> Optional[str]:

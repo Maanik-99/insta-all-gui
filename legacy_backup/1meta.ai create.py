@@ -44,8 +44,6 @@ from email_service import (
     extract_otp_from_text,
     get_random_name,
     load_names_from_csv,
-    delete_previous_cpanel_email,
-    save_last_created_email,
     generate_custom_password,
     load_config,
     log,

@@ -66,7 +66,6 @@ VIEWPORT_HEIGHT = 700
 from email_service import (
     CONFIG_FILE,
     DEFAULT_CONFIG,
-    delete_previous_cpanel_email,
     extract_otp_from_text,
     fetch_otp_from_temp_mail,
     generate_custom_password,
@@ -75,7 +74,6 @@ from email_service import (
     load_config,
     load_names_from_csv,
     log,
-    save_last_created_email,
 )
 
 

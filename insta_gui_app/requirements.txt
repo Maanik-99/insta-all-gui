@@ -1,8 +1,0 @@
-playwright
-telethon
-pyotp
-requests
-urllib3
-gspread
-google-auth
-argon2-cffi

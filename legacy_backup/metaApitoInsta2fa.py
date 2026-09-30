@@ -1,7 +1,6 @@
 import asyncio
 import base64
 import csv
-import glob
 import hashlib
 import json
 import os
@@ -34,7 +33,6 @@ except ImportError:
     import requests as curl_requests
     USE_CURL_CFFI = False
 
-from playwright.async_api import async_playwright, Playwright, BrowserContext, Page
 from telethon import TelegramClient, events, errors
 from telethon.tl.custom import Button
 
@@ -83,17 +81,19 @@ AUTO_REPEAT_TASKS = _TG_CFG.get("auto_repeat_tasks", True)
 # 👉 টেলিগ্রাম বটে বাটন ক্লিকের মাঝে অপেক্ষার সময় (অপ্টিমাইজড ফাস্ট রেসপন্স)
 DELAY_BETWEEN_STEPS = _TG_CFG.get("delay_between_steps", 0.5)
 
-# 👉 Meta AI তৈরির জন্য মূল URL সেটিংস
-TARGET_URL = "https://www.meta.ai/"
-CHECKPOINT_REDIRECT_URL = "https://auth.meta.com/checkpoints/675270400317265/?next=https%3A%2F%2Fauth.meta.com%2Frecover%2Fsuccess%2F%3Fredirect_uri%3Dhttps%253A%252F%252Fauth.meta.com%252F"
-
-# 👉 ব্রাউজার সেটিংস
-HEADLESS = _CFG.get("headless", False)
-VIEWPORT_WIDTH = _CFG.get("viewport_width", 500)       # ব্রাউজার উইন্ডোর প্রস্থ (Width)
-VIEWPORT_HEIGHT = _CFG.get("viewport_height", 700)      # ব্রাউজার উইন্ডোর উচ্চতা (Height)
+# 👉 এমুলেটর সিলেকশন ও অন/অফ সেটিংস (config.json থেকে স্বয়ংক্রিয়ভাবে লোড হবে)
+_EMU_CFG = _CFG.get("emulators", {})
+DEFAULT_EMULATOR_CONFIG = {
+    "ldplayer": _EMU_CFG.get("ldplayer", True),
+    "mumu": _EMU_CFG.get("mumu", True),
+    "nox": _EMU_CFG.get("nox", False),
+    "memu": _EMU_CFG.get("memu", False),
+    "custom_ports": _EMU_CFG.get("custom_ports", []),
+    "custom_devices": _EMU_CFG.get("custom_devices", [])
+}
 
 # 👉 এমুলেটরে ব্যবহৃত ব্রাউজার প্যাকেজ নেম (ডিফল্ট: Via Browser)
-PACKAGE_NAME = "mark.via.gp"
+PACKAGE_NAME = "mark.via.gq"
 
 # 👉 ইনস্টাগ্রাম ও 2FA ইউআরএল সেটিংস
 INSTA_LOGIN_URL = "https://www.instagram.com/accounts/login"
@@ -107,7 +107,8 @@ CREDENTIALS_CSV = os.path.join(BASE_DIR, "credentials.csv")
 csv_lock = threading.Lock()
 
 # ==============================================================================
-# LOGGING
+# 📝 LOGGING & CONSOLE OUTPUT
+# ==============================================================================
 LOG_CALLBACK = None
 
 def set_log_callback(cb):
@@ -131,7 +132,7 @@ def log(tag, message, instance_name=""):
             pass
 
 # ==============================================================================
-# STORAGE & GSHEET HELPERS
+# 💾 STORAGE & GSHEET HELPERS
 # ==============================================================================
 def save_credentials_csv(email, password, two_factor_secret="", username="", instance_name=""):
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -154,8 +155,10 @@ def save_credentials_csv(email, password, two_factor_secret="", username="", ins
                 gsheet_manager.save_done_account(timestamp, email, uname, password, two_factor_secret, instance_name=instance_name)
             except Exception as e:
                 log("GSHEET-ERR", f"Failed syncing to Google Sheet: {e}", instance_name=instance_name)
+        threading.Thread(target=_save_gsheet, daemon=True).start()
+
 # ==============================================================================
-# 🔐 META AUTH CRYPTO & REQUEST CLIENT (PURE REQUEST REGISTRATION ENGINE)
+# 🔐 META AUTH CRYPTO & FULL API REQUEST ENGINE (100% PURE HTTP - NO BROWSER)
 # ==============================================================================
 
 def format_pwd_browser(encrypted_b64: str, timestamp: Optional[int] = None, version: int = 5) -> str:
@@ -258,7 +261,7 @@ def build_falco_payload(
 
 class MetaAuthClient:
     """
-    Automates fast pure-HTTP request registration on auth.meta.com.
+    Automates fast 100% pure-HTTP request registration on auth.meta.com.
     """
     BASE_URL = "https://auth.meta.com"
     SOURCE_APP_ID = "1522763855472543"
@@ -410,7 +413,7 @@ class MetaAuthClient:
 
     def init_session(self, oidc_redirect_uri: Optional[str] = None) -> bool:
         """Step 1: Load landing page to capture datr, LSD, public key, key ID, and rcs."""
-        log("REQ-INIT", "Initializing Meta Auth request session...", self.instance_name)
+        log("REQ-INIT", "Initializing Meta Auth API session...", self.instance_name)
         landing_url = f"{self.BASE_URL}/"
         if oidc_redirect_uri:
             self.oidc_redirect_uri = oidc_redirect_uri
@@ -457,7 +460,7 @@ class MetaAuthClient:
                 self.jurisdiction = juris_match.group(1)
 
             self.session.headers["referer"] = self._get_current_referer()
-            log("REQ-INIT", f"Session ready! LSD={self.lsd[:12] if self.lsd else 'N/A'}... KeyID={self.key_id}", self.instance_name)
+            log("REQ-INIT", f"Meta Auth Session ready! LSD={self.lsd[:12] if self.lsd else 'N/A'}... KeyID={self.key_id}", self.instance_name)
             return True
         except Exception as e:
             log("REQ-ERR", f"Failed to initialize auth session: {e}", self.instance_name)
@@ -779,6 +782,24 @@ class MetaAuthClient:
         }
         return self.send_graphql_request(doc_id="9851798224911796", variables=variables)
 
+    def resend_email_otp(self, email: Optional[str] = None) -> Dict[str, Any]:
+        """Resends email confirmation OTP code."""
+        target_email = email or self.email
+        log("REQ-OTP-RESEND", f"Requesting OTP resend for {target_email}...", self.instance_name)
+        variables = {
+            "input": {
+                "contact_point": {
+                    "sensitive_string_value": target_email
+                },
+                "contact_point_type": "EMAIL_ADDRESS",
+                "event_flow": "ntm",
+                "rl_client_session_id": self.client_session_id,
+                "source_app_id": self.SOURCE_APP_ID,
+                "waterfall_id": self.waterfall_id
+            }
+        }
+        return self.send_graphql_request(doc_id="25885129117818218", variables=variables)
+
     def send_graphql_request(self, doc_id: str, variables: Dict[str, Any]) -> Dict[str, Any]:
         url = f"{self.BASE_URL}/api/graphql/"
         data = {
@@ -804,1524 +825,28 @@ class MetaAuthClient:
             return {"raw_response": text}
 
 
-def extract_cookies_for_playwright(session) -> List[Dict[str, Any]]:
-    """Extract cookies from requests/curl_cffi session to inject into Playwright."""
-    playwright_cookies = []
-    seen = set()
-    try:
-        jar = getattr(session.cookies, "jar", None)
-        if jar is not None:
-            for cookie in jar:
-                name = str(getattr(cookie, "name", ""))
-                value = str(getattr(cookie, "value", ""))
-                if not name or not value:
-                    continue
-                domain = str(getattr(cookie, "domain", "")) or ".meta.com"
-                path = str(getattr(cookie, "path", "")) or "/"
-                key = (name, domain, path)
-                if key not in seen:
-                    seen.add(key)
-                    c: Dict[str, Any] = {
-                        "name": name,
-                        "value": value,
-                        "domain": domain,
-                        "path": path,
-                    }
-                    if getattr(cookie, "secure", None) is not None:
-                        c["secure"] = bool(cookie.secure)
-                    if getattr(cookie, "expires", None) is not None and cookie.expires > time.time():
-                        c["expires"] = int(cookie.expires)
-                    playwright_cookies.append(c)
-
-                if "auth.meta.com" in domain:
-                    for d in [".meta.com", ".meta.ai"]:
-                        k = (name, d, path)
-                        if k not in seen:
-                            seen.add(k)
-                            playwright_cookies.append({
-                                "name": name,
-                                "value": value,
-                                "domain": d,
-                                "path": path,
-                            })
-
-        if hasattr(session.cookies, "get_dict"):
-            cookies_dict = session.cookies.get_dict()
-            for name, value in cookies_dict.items():
-                if not name or not value:
-                    continue
-                for d in [".auth.meta.com", ".meta.com", ".meta.ai"]:
-                    key = (str(name), d, "/")
-                    if key not in seen:
-                        seen.add(key)
-                        playwright_cookies.append({
-                            "name": str(name),
-                            "value": str(value),
-                            "domain": d,
-                            "path": "/",
-                        })
-    except Exception as e:
-        log("COOKIE-WARN", f"Error extracting session cookies: {e}")
-    return playwright_cookies
-
-
-# ==============================================================================
-# PLAYWRIGHT META AI AUTOMATION ENGINE (HANDOVER & CHECKPOINT SOLVER)
-# ==============================================================================
-async def get_active_meta_page(context: BrowserContext, default_page: Page = None) -> Page:
-    try:
-        pages = context.pages
-        if not pages:
-            return default_page or await context.new_page()
-
-        for p in reversed(pages):
-            try:
-                if p.is_closed():
-                    continue
-                url = p.url.lower()
-                if any(k in url for k in ["auth.meta.com", "checkpoint", "challenge", "recover", "login", "signup", "confirm"]):
-                    return p
-            except Exception:
-                pass
-
-        for p in reversed(pages):
-            try:
-                if p.is_closed():
-                    continue
-                url = p.url.lower()
-                if "meta.ai" in url:
-                    return p
-            except Exception:
-                pass
-
-        for p in reversed(pages):
-            try:
-                if not p.is_closed() and p.url and not p.url.startswith("about:blank"):
-                    return p
-            except Exception:
-                pass
-
-        return pages[-1]
-    except Exception:
-        return default_page or (context.pages[0] if context.pages else None)
-
-async def robust_click(page: Page, selectors: list[str] | str, desc="Element", timeout=1000, force_fallback=True) -> bool:
-    if isinstance(selectors, str):
-        query_candidates = [selectors]
-    else:
-        combined = ", ".join(selectors)
-        query_candidates = [combined]
-
-    for sel in query_candidates:
-        try:
-            loc = page.locator(sel).first
-            if await loc.is_visible(timeout=timeout):
-                try:
-                    await loc.click(timeout=timeout)
-                    return True
-                except Exception:
-                    if force_fallback:
-                        try:
-                            await loc.click(force=True, timeout=600)
-                            return True
-                        except Exception:
-                            try:
-                                await loc.evaluate("el => el.click()")
-                                return True
-                            except Exception:
-                                pass
-        except Exception:
-            continue
-            
-    if isinstance(selectors, list) and len(selectors) > 1:
-        for single_sel in selectors:
-            try:
-                loc = page.locator(single_sel).first
-                if await loc.is_visible(timeout=200):
-                    try:
-                        await loc.click(timeout=600)
-                        return True
-                    except Exception:
-                        await loc.click(force=True, timeout=400)
-                        return True
-            except Exception:
-                continue
-
-    return False
-
-async def human_type(locator, text: str, min_delay: int = 4, max_delay: int = 12):
-    await locator.click()
-    try:
-        await locator.press("Control+A")
-        await locator.press("Backspace")
-    except Exception:
-        pass
-
-    for i, ch in enumerate(text):
-        delay_ms = random.randint(min_delay, max_delay)
-        await locator.press_sequentially(ch, delay=delay_ms)
-        if ch in ["@", "."] or (i > 0 and i % 8 == 0):
-            await asyncio.sleep(random.uniform(0.01, 0.03))
-
-    try:
-        await locator.evaluate("el => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
-    except Exception:
-        pass
-
-async def robust_fill(page: Page, selectors: list[str] | str, value: str, desc="Input field", timeout=2000, human_speed=True) -> bool:
-    if isinstance(selectors, str):
-        query_candidates = [selectors]
-    else:
-        combined = ", ".join(selectors)
-        query_candidates = [combined]
-
-    for sel in query_candidates:
-        try:
-            loc = page.locator(sel).first
-            if await loc.is_visible(timeout=timeout):
-                try:
-                    await loc.click()
-                    await loc.fill(value, timeout=timeout)
-                    await loc.evaluate("el => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
-                    return True
-                except Exception:
-                    try:
-                        await loc.evaluate(f"(el, val) => {{ el.value = val; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); }}", value)
-                        return True
-                    except Exception:
-                        pass
-        except Exception:
-            continue
-            
-    if isinstance(selectors, list) and len(selectors) > 1:
-        for single_sel in selectors:
-            try:
-                loc = page.locator(single_sel).first
-                if await loc.is_visible(timeout=250):
-                    if human_speed:
-                        try:
-                            await human_type(loc, value)
-                            return True
-                        except Exception:
-                            pass
-                    await loc.fill(value)
-                    return True
-            except Exception:
-                continue
-
-    return False
-
-async def click_next_or_continue(page: Page, timeout=1000) -> bool:
-    next_btn_combined = (
-        "button[type='submit'], "
-        "button:has-text('Next'), "
-        "button:has-text('Continue'), "
-        "button:has-text('Sign up'), "
-        "button:has-text('Create account'), "
-        "button:has-text('Confirm'), "
-        "button:has-text('Save'), "
-        "button:has-text('Agree and continue'), "
-        "button:has-text('I agree'), "
-        "div[role='button']:has-text('Next'), "
-        "div[role='button']:has-text('Continue'), "
-        "div[role='button']:has-text('Sign up'), "
-        "div[role='button']:has-text('Create account'), "
-        "div[role='button']:has-text('Confirm'), "
-        "div[role='button']:has-text('Agree and continue')"
-    )
-    clicked = await robust_click(page, next_btn_combined, desc="Next/Continue Button", timeout=timeout)
-    if not clicked:
-        try:
-            await page.keyboard.press("Enter")
-            return True
-        except Exception:
-            pass
-    return clicked
-
-async def handle_cookie_banners(page: Page, instance_name="") -> bool:
-    try:
-        if page.is_closed():
-            return False
-
-        try:
-            await page.evaluate('''() => {
-                window.scrollTo({ top: document.body.scrollHeight, behavior: 'instant' });
-                if (document.documentElement) document.documentElement.scrollTop = document.documentElement.scrollHeight;
-                if (document.body) document.body.scrollTop = document.body.scrollHeight;
-            }''')
-        except Exception:
-            pass
-
-        cookie_selectors = [
-            "span.xlyipyv:has-text('Allow all cookies')",
-            "span.xuxw1ft:has-text('Allow all cookies')",
-            "span.x1lliihq.x193iq5w:has-text('Allow all cookies')",
-            "span:has-text('Allow all cookies')",
-            "div[role='button']:has(span:has-text('Allow all cookies'))",
-            "[role='button']:has-text('Allow all cookies')",
-            "div[role='button']:has-text('Allow all cookies')",
-            "button:has-text('Allow all cookies')",
-            "[role='button']:has-text('Accept all cookies')",
-            "div[role='button']:has-text('Accept all cookies')",
-            "button:has-text('Accept all cookies')",
-            "[role='button']:has-text('Allow essential cookies')",
-            "button:has-text('Allow essential cookies')",
-            "[role='button']:has-text('Decline optional cookies')",
-            "button:has-text('Decline optional cookies')",
-            "button:has-text('Allow cookies')",
-            "button:has-text('Accept all')",
-            "button:has-text('Allow all')",
-            "button:has-text('Accept')",
-            "button:has-text('Allow')",
-            "div[role='button']:has-text('Allow all')",
-            "div[role='button']:has-text('Accept all')"
-        ]
-        for sel in cookie_selectors:
-            try:
-                loc = page.locator(sel).first
-                if await loc.is_visible(timeout=250):
-                    log("ACTION", f"Clicking 'Allow all cookies' via ({sel})...", instance_name=instance_name)
-                    await loc.scroll_into_view_if_needed(timeout=400)
-                    await loc.click(force=True, timeout=600)
-                    await asyncio.sleep(0.4)
-                    return True
-            except Exception:
-                pass
-
-        clicked_js = await page.evaluate('''() => {
-            const allElements = Array.from(document.querySelectorAll("span, [role='button'], button, div[tabindex='0']"));
-            for (const el of allElements) {
-                const txt = (el.innerText || el.textContent || '').trim().toLowerCase();
-                if (txt === 'allow all cookies' || txt.includes('allow all cookies') || txt.includes('accept all cookies') || txt.includes('allow essential cookies')) {
-                    el.scrollIntoView({ block: 'center', inline: 'center' });
-                    el.click();
-                    const parent = el.closest("[role='button']") || el.closest("button") || el;
-                    parent.click();
-                    parent.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                    return true;
-                }
-            }
-            return false;
-        }''')
-        if clicked_js:
-            log("ACTION", "Dismissed cookie banner via JS evaluation!", instance_name=instance_name)
-            await asyncio.sleep(0.4)
-            return True
-    except Exception as e:
-        log("ACTION-WARN", f"handle_cookie_banners note: {e}", instance_name=instance_name)
-    return False
-
-async def dismiss_error_modals(page: Page, instance_name="") -> bool:
-    try:
-        if page.is_closed():
-            return False
-
-        has_dialog = await page.locator("div[role='dialog']:has-text('Something went wrong'), :has-text('Something went wrong'), div[role='dialog'] [role='button']:has-text('OK'), div[role='dialog'] button:has-text('OK')").count() > 0
-        if has_dialog:
-            log("ACTION", "Dismissing 'Something went wrong' popup by pressing ESC...", instance_name=instance_name)
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(0.3)
-
-            ok_selectors = [
-                "div[role='dialog'] [role='button']:has-text('OK')",
-                "div[role='dialog'] div[role='button']:has-text('OK')",
-                "div[role='dialog'] button:has-text('OK')",
-                "div[role='dialog'] [aria-label='Close']",
-                "div[role='dialog'] [role='button'][tabindex='0']"
-            ]
-            for sel in ok_selectors:
-                try:
-                    loc = page.locator(sel).first
-                    if await loc.is_visible(timeout=150):
-                        await loc.click(force=True, timeout=400)
-                        await asyncio.sleep(0.2)
-                        break
-                except Exception:
-                    pass
-
-            await handle_cookie_banners(page, instance_name=instance_name)
-            return True
-    except Exception as e:
-        log("ACTION-WARN", f"dismiss_error_modals note: {e}", instance_name=instance_name)
-    return False
-
-async def dismiss_meta_ai_dialog_or_popup(page: Page, instance_name="") -> bool:
-    try:
-        if page.is_closed():
-            return False
-
-        # 1. Try finding and clicking close/dismiss buttons on any dialog/popup
-        close_selectors = [
-            "div[role='dialog'] [aria-label='Close']",
-            "div[role='dialog'] [aria-label='close']",
-            "div[role='dialog'] button:has-text('Close')",
-            "div[role='dialog'] [role='button']:has-text('Close')",
-            "div[role='dialog'] button:has-text('Not now')",
-            "div[role='dialog'] [role='button']:has-text('Not now')",
-            "div[role='dialog'] button:has-text('Dismiss')",
-            "div[role='dialog'] button:has-text('Continue')",
-            "[aria-label='Close']",
-            "button[aria-label='Close']",
-            "svg[aria-label='Close']",
-            "button:has-text('Not now')"
-        ]
-        for sel in close_selectors:
-            try:
-                loc = page.locator(sel).first
-                if await loc.is_visible(timeout=200):
-                    log("ACTION", f"Dismissing meta.ai popup via button ({sel})...", instance_name=instance_name)
-                    await loc.click(force=True, timeout=500)
-                    await asyncio.sleep(0.4)
-                    return True
-            except Exception:
-                pass
-
-        # 2. Press Escape key in case it's dismissable
-        try:
-            await page.keyboard.press("Escape")
-            await asyncio.sleep(0.2)
-        except Exception:
-            pass
-
-        # 3. Remove dialog/backdrop elements if still blocking (e.g., backdrop-blur-elevation-03, bg-fill-dialog)
-        removed = await page.evaluate('''() => {
-            let removedCount = 0;
-            const popups = Array.from(document.querySelectorAll(
-                ".backdrop-blur-elevation-03, .bg-fill-dialog, [class*='backdrop-blur'], div[role='dialog'], [aria-modal='true']"
-            ));
-            for (const el of popups) {
-                const parentModal = el.closest("[role='dialog']") || el.closest("[aria-modal='true']") || el;
-                if (parentModal && parentModal !== document.body && parentModal !== document.documentElement) {
-                    parentModal.style.display = 'none';
-                    parentModal.remove();
-                    removedCount++;
-                }
-            }
-            if (removedCount > 0) {
-                document.body.style.overflow = 'auto';
-                if (document.documentElement) document.documentElement.style.overflow = 'auto';
-                return true;
-            }
-            return false;
-        }''')
-        if removed:
-            log("ACTION", "Removed meta.ai dialog/backdrop popup overlay from DOM!", instance_name=instance_name)
-            await asyncio.sleep(0.3)
-            return True
-    except Exception as e:
-        log("ACTION-WARN", f"dismiss_meta_ai_dialog_or_popup note: {e}", instance_name=instance_name)
-    return False
-
-async def handle_save_login_info_prompt(page: Page, context: BrowserContext, instance_name="") -> bool:
-    for p in [page] + [pg for pg in context.pages if pg != page and not pg.is_closed()]:
-        try:
-            active_btn_selectors = [
-                "div[role='button'][tabindex='0']:has-text('Not now')",
-                "div[role='button']:not([aria-disabled='true']):has-text('Not now')",
-                "[role='button']:not([aria-disabled='true']):has-text('Not now')",
-                "button:not([disabled]):has-text('Not now')",
-                "div[role='button']:has-text('Not now')"
-            ]
-            for sel in active_btn_selectors:
-                try:
-                    loc = p.locator(sel).last
-                    if await loc.is_visible(timeout=250):
-                        log("ACTION", f"Clicking active 'Not now' button ({sel})...", instance_name=instance_name)
-                        await loc.click(force=True, timeout=800)
-                        await asyncio.sleep(0.6)
-                        return True
-                except Exception:
-                    pass
-
-            clicked_js = await p.evaluate('''() => {
-                const buttons = Array.from(document.querySelectorAll("div[role='button'], button, [role='button']"));
-                for (const btn of buttons) {
-                    const txt = (btn.innerText || btn.textContent || '').trim().toLowerCase();
-                    const disabled = btn.getAttribute('aria-disabled') === 'true' || btn.disabled;
-                    const hidden = btn.closest('[aria-hidden="true"]');
-                    if (txt.includes('not now') && !disabled && !hidden) {
-                        btn.click();
-                        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                        return true;
-                    }
-                }
-                return false;
-            }''')
-            if clicked_js:
-                log("ACTION", "Clicked active 'Not now' button via JS DOM evaluation!", instance_name=instance_name)
-                await asyncio.sleep(0.6)
-                return True
-        except Exception as e:
-            log("ACTION-WARN", f"Save login prompt note: {e}", instance_name=instance_name)
-    return False
-
-async def try_click_saved_account_card(page: Page, instance_name="") -> bool:
-    try:
-        if page.is_closed():
-            return False
-        account_selectors_combined = (
-            "div[role='button']:has-text('Continue as'), "
-            "[role='button']:has-text('Continue as'), "
-            "button:has-text('Continue as'), "
-            "div[role='button']:has-text('@'), "
-            "[role='button']:has-text('@'), "
-            "div[role='button']:has-text('.com')"
-        )
-        btn = page.locator(account_selectors_combined).first
-        if await btn.is_visible(timeout=200):
-            txt = (await btn.inner_text()).replace('\n', ' ').strip()
-            if "use another account" not in txt.lower() and "log in to another account" not in txt.lower():
-                log("ACTION", f"Clicking saved account card: '{txt}'", instance_name=instance_name)
-                await btn.click(force=True)
-                await asyncio.sleep(0.8)
-                return True
-    except Exception:
-        pass
-    return False
-
-async def click_use_mobile_or_email(page: Page, context: BrowserContext, instance_name="") -> bool:
-    pages_to_try = [page] + [p for p in context.pages if p != page and not p.is_closed()]
-
-    for p in pages_to_try:
-        try:
-            if p.is_closed():
-                continue
-
-            try:
-                text_btn = p.get_by_text("Use mobile number or email address", exact=False).first
-                if await text_btn.is_visible(timeout=400):
-                    log("ACTION", "Found 'Use mobile number or email address' via get_by_text. Clicking...", instance_name=instance_name)
-                    await text_btn.click(force=True, timeout=1000)
-                    await asyncio.sleep(1.0)
-                    return True
-            except Exception:
-                pass
-
-            exact_btn = p.locator("div[role='button'], [role='button'], button, a").filter(has_text=re.compile(r"Use mobile number or email address", re.I)).first
-            if await exact_btn.is_visible(timeout=350):
-                log("ACTION", "Clicking div[role='button'] 'Use mobile number or email address'...", instance_name=instance_name)
-                try:
-                    await exact_btn.click(timeout=1000)
-                    await asyncio.sleep(1.0)
-                    return True
-                except Exception:
-                    try:
-                        await exact_btn.click(force=True, timeout=800)
-                        await asyncio.sleep(1.0)
-                        return True
-                    except Exception:
-                        pass
-
-            clicked_js = await p.evaluate('''() => {
-                const buttons = Array.from(document.querySelectorAll("div[role='button'], [role='button'], div[tabindex='0'], span, a, button"));
-                for (const b of buttons) {
-                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                    if (txt.includes('facebook') || txt.includes('instagram')) continue;
-                    if (txt === 'use mobile number or email address' || 
-                        txt === 'use email address or mobile number' ||
-                        txt.includes('use mobile number or email address') ||
-                        txt.includes('use email address or mobile number') ||
-                        txt.startsWith('use mobile number') ||
-                        txt.startsWith('use email address')) {
-                        const target = b.closest("[role='button']") || b;
-                        target.scrollIntoView({ block: 'center', inline: 'center' });
-                        target.click();
-                        target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                        target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                        target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                        return true;
-                    }
-                }
-                return false;
-            }''')
-
-            if clicked_js:
-                log("ACTION", "Clicked 'Use mobile number or email address' via JS DOM execution!", instance_name=instance_name)
-                await asyncio.sleep(1.0)
-                return True
-
-            btn_loc = p.locator("div[role='button']:has-text('Use mobile number or email address'), [role='button']:has-text('Use mobile number or email address'), span:has-text('Use mobile number or email address')").last
-            if await btn_loc.is_visible(timeout=300):
-                box = await btn_loc.bounding_box()
-                if box:
-                    click_x = box['x'] + box['width'] / 2
-                    click_y = box['y'] + box['height'] / 2
-                    log("ACTION", f"Clicking 'Use mobile number or email address' via coordinates ({click_x:.1f}, {click_y:.1f})...", instance_name=instance_name)
-                    await p.mouse.click(click_x, click_y)
-                    await asyncio.sleep(1.0)
-                    return True
-
-        except Exception as e:
-            log("ACTION-WARN", f"click_use_mobile_or_email note: {e}", instance_name=instance_name)
-            continue
-
-    return False
-
-async def handle_dob_selection(page: Page, instance_name="") -> bool:
-    target_day_int = random.randint(1, 28)
-    target_day = str(target_day_int)
-    target_day_2digit = f"{target_day_int:02d}"
-    
-    months_data = [
-        ("January", "Jan", "1", "01"),
-        ("February", "Feb", "2", "02"),
-        ("March", "Mar", "3", "03"),
-        ("April", "Apr", "4", "04"),
-        ("May", "May", "5", "05"),
-        ("June", "Jun", "6", "06"),
-        ("July", "Jul", "7", "07"),
-        ("August", "Aug", "8", "08"),
-        ("September", "Sep", "9", "09"),
-        ("October", "Oct", "10", "10"),
-        ("November", "Nov", "11", "11"),
-        ("December", "Dec", "12", "12")
-    ]
-    chosen_month = random.choice(months_data)
-    target_month_full, target_month_short, target_month_num, target_month_2digit = chosen_month
-    target_year = str(random.randint(1990, 2002))
-    
-    log("DOB", f"Setting DOB -> {target_month_full} {target_day}, {target_year}", instance_name=instance_name)
-
-    try:
-        selects = page.locator("select")
-        select_count = await selects.count()
-        if select_count >= 3:
-            month_sel = page.locator("select[name*='month' i], select[aria-label*='month' i], select[id*='month' i]").first
-            day_sel = page.locator("select[name*='day' i], select[aria-label*='day' i], select[id*='day' i]").first
-            year_sel = page.locator("select[name*='year' i], select[aria-label*='year' i], select[id*='year' i]").first
-
-            if await month_sel.count() > 0:
-                for opt_val in [target_month_full, target_month_short, target_month_num, target_month_2digit]:
-                    try:
-                        await month_sel.select_option(label=opt_val)
-                        break
-                    except Exception:
-                        try:
-                            await month_sel.select_option(value=opt_val)
-                            break
-                        except Exception:
-                            pass
-            else:
-                try:
-                    await selects.nth(0).select_option(index=int(target_month_num))
-                except Exception:
-                    pass
-
-            if await day_sel.count() > 0:
-                for opt_val in [target_day, target_day_2digit]:
-                    try:
-                        await day_sel.select_option(label=opt_val)
-                        break
-                    except Exception:
-                        try:
-                            await day_sel.select_option(value=opt_val)
-                            break
-                        except Exception:
-                            pass
-            else:
-                try:
-                    await selects.nth(1).select_option(index=target_day_int)
-                except Exception:
-                    pass
-
-            if await year_sel.count() > 0:
-                try:
-                    await year_sel.select_option(label=target_year)
-                except Exception:
-                    try:
-                        await year_sel.select_option(value=target_year)
-                    except Exception:
-                        pass
-            else:
-                try:
-                    await selects.nth(2).select_option(label=target_year)
-                except Exception:
-                    pass
-
-            return True
-    except Exception:
-        pass
-
-    try:
-        month_input = page.locator("input[name*='month' i], input[placeholder*='MM' i], input[aria-label*='month' i]").first
-        day_input = page.locator("input[name*='day' i], input[placeholder*='DD' i], input[aria-label*='day' i]").first
-        year_input = page.locator("input[name*='year' i], input[placeholder*='YYYY' i], input[aria-label*='year' i]").first
-        
-        if await month_input.is_visible(timeout=200) and await day_input.is_visible(timeout=200) and await year_input.is_visible(timeout=200):
-            await month_input.fill(target_month_num)
-            await day_input.fill(target_day)
-            await year_input.fill(target_year)
-            return True
-    except Exception:
-        pass
-
-    async def select_combobox_option(cb_locator, match_strings: list[str], type_fallback_val: str) -> bool:
-        try:
-            if not await cb_locator.is_visible(timeout=400):
-                return False
-            await cb_locator.click()
-            await asyncio.sleep(0.15)
-            for match_str in match_strings:
-                pat = re.compile(rf"\b{re.escape(match_str)}\b", re.I)
-                opt = page.locator("[role='option'], div[role='option'], li[role='option'], [data-value]").filter(has_text=pat).first
-                if await opt.is_visible(timeout=400):
-                    await opt.click()
-                    await asyncio.sleep(0.15)
-                    return True
-            try:
-                await cb_locator.fill("")
-                await cb_locator.press_sequentially(type_fallback_val, delay=15)
-                await cb_locator.press("Enter")
-                return True
-            except Exception:
-                pass
-        except Exception:
-            pass
-        return False
-
-    month_cb = page.locator("[role='combobox'][aria-label*='month' i], [aria-label*='Month' i]").first
-    day_cb = page.locator("[role='combobox'][aria-label*='day' i], [aria-label*='Day' i]").first
-    year_cb = page.locator("[role='combobox'][aria-label*='year' i], [aria-label*='Year' i]").first
-
-    await select_combobox_option(month_cb, [target_month_full, target_month_short, target_month_num, target_month_2digit], target_month_full)
-    await select_combobox_option(day_cb, [target_day, target_day_2digit], target_day)
-    await select_combobox_option(year_cb, [target_year], target_year)
-
-    return True
-
-async def is_otp_screen_active(page: Page) -> bool:
-    try:
-        if page.is_closed():
-            return False
-        
-        text_check = page.locator(
-            ":has-text('Enter the code'), "
-            ":has-text('Enter confirmation code'), "
-            ":has-text('Enter code'), "
-            ":has-text('Check your email'), "
-            ":has-text('We sent a code'), "
-            ":has-text('We sent an email'), "
-            ":has-text('Enter the 6-digit code'), "
-            ":has-text('6-digit code'), "
-            ":has-text('Enter 6-digit code'), "
-            ":has-text('Enter security code'), "
-            ":has-text('Confirmation code')"
-        ).first
-        if await text_check.count() > 0:
-            return True
-
-        input_check = page.locator(
-            "input[autocomplete*='one-time-code'], "
-            "input[name*='code' i], "
-            "input[aria-label*='code' i], "
-            "input[placeholder*='code' i], "
-            "input[data-index]"
-        ).first
-        if await input_check.is_visible(timeout=150):
-            return True
-    except Exception:
-        pass
-    return False
-
-async def handle_dob_and_password_step(page: Page, context: BrowserContext, first_val: str, last_val: str, strong_password: str, instance_name="") -> bool:
-    log("STEP-4", f"Starting Name ({first_val} {last_val}), DOB, and Password configuration...", instance_name=instance_name)
-    
-    for loop_idx in range(6):
-        await asyncio.sleep(0.6)
-        active_p = await get_active_meta_page(context, default_page=page)
-
-        await handle_recaptcha_2captcha(active_p, context, instance_name=instance_name)
-
-        if await is_otp_screen_active(active_p):
-            log("STEP-4", "Detected OTP screen! Exiting Step 4 so OTP can be fetched and entered.", instance_name=instance_name)
-            return True
-
-        has_selfie = await active_p.locator(":has-text('Upload a verification selfie'), :has-text(\"Confirm that you're human\"), span:has-text('Upload Image'), div[aria-label='Upload Image']").count() > 0
-        if has_selfie:
-            log("STEP-4", "Detected verification selfie/human screen! Step 4 complete.", instance_name=instance_name)
-            return True
-
-        name_input_selectors = [
-            "input[name*='firstname' i]", "input[name*='first_name' i]", "input[autocomplete='given-name']",
-            "input[placeholder*='first name' i]", "input[aria-label*='first name' i]"
-        ]
-        lastname_input_selectors = [
-            "input[name*='lastname' i]", "input[name*='last_name' i]", "input[name*='surname' i]", "input[autocomplete='family-name']",
-            "input[placeholder*='last name' i]", "input[placeholder*='surname' i]", "input[aria-label*='last name' i]"
-        ]
-        fullname_input_selectors = [
-            "input[name='name']", "input[name*='fullname' i]",
-            "input[placeholder*='full name' i]", "input[placeholder*='name' i]", "input[aria-label*='name' i]"
-        ]
-        
-        try:
-            first_input = active_p.locator(name_input_selectors[0]).first
-            if await first_input.is_visible(timeout=200):
-                val = await first_input.input_value()
-                if not val:
-                    log("ACTION", f"Entering First & Last Name: {first_val} {last_val}", instance_name=instance_name)
-                    await robust_fill(active_p, name_input_selectors, first_val, desc="First Name", timeout=600)
-                    await robust_fill(active_p, lastname_input_selectors, last_val, desc="Last Name", timeout=600)
-            else:
-                full_input = active_p.locator(fullname_input_selectors[0]).first
-                if await full_input.is_visible(timeout=200):
-                    val = await full_input.input_value()
-                    if not val:
-                        log("ACTION", f"Entering Full Name: {first_val} {last_val}", instance_name=instance_name)
-                        await robust_fill(active_p, fullname_input_selectors, f"{first_val} {last_val}", desc="Full Name", timeout=600)
-        except Exception:
-            pass
-
-        try:
-            has_dob = (
-                await active_p.locator("select").count() >= 2 or
-                await active_p.locator("[role='combobox'][aria-label*='month' i], [role='combobox'][aria-label*='day' i]").count() > 0 or
-                await active_p.locator("input[name*='birthday' i], input[placeholder*='YYYY' i]").count() > 0
-            )
-            if has_dob:
-                await handle_dob_selection(active_p, instance_name=instance_name)
-        except Exception:
-            pass
-
-        try:
-            pwd_inputs = active_p.locator("input[type='password'], input[name*='pass' i], input[autocomplete*='password' i], input[placeholder*='password' i]")
-            pwd_count = await pwd_inputs.count()
-            if pwd_count > 0:
-                for p_idx in range(pwd_count):
-                    p_loc = pwd_inputs.nth(p_idx)
-                    if await p_loc.is_visible(timeout=200):
-                        val = await p_loc.input_value()
-                        if not val:
-                            log("ACTION", f"Entering password into field #{p_idx+1}...", instance_name=instance_name)
-                            await p_loc.fill(strong_password)
-                            try:
-                                await p_loc.evaluate("el => { el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
-                            except Exception:
-                                pass
-        except Exception:
-            pass
-
-        try:
-            checkboxes = active_p.locator("input[type='checkbox']:not(:checked), [role='checkbox'][aria-checked='false']")
-            cb_count = await checkboxes.count()
-            if cb_count > 0:
-                for c_idx in range(cb_count):
-                    cb = checkboxes.nth(c_idx)
-                    if await cb.is_visible(timeout=150):
-                        log("ACTION", f"Checking agreement box #{c_idx+1}...", instance_name=instance_name)
-                        await cb.click(force=True)
-        except Exception:
-            pass
-
-        if await is_otp_screen_active(active_p):
-            log("STEP-4", "Detected OTP screen! Exiting Step 4 without clicking Next.", instance_name=instance_name)
-            return True
-
-        await click_next_or_continue(active_p, timeout=1000)
-        await asyncio.sleep(1.0)
-        
-        if await is_otp_screen_active(active_p):
-            log("STEP-4", "Now on OTP screen! Step 4 complete.", instance_name=instance_name)
-            return True
-
-    return True
-
-async def extract_meta_username(context: BrowserContext) -> str | None:
-    user_menu_combined = (
-        "div[data-testid='user-menu-button'] span.truncate, "
-        "div[data-testid='user-menu-button'] span, "
-        "div[data-slot='dropdown-menu-trigger'][data-testid='user-menu-button'] span, "
-        "div[data-slot='dropdown-menu-trigger'][data-testid='user-menu-button'], "
-        "[data-testid='user-menu-button'], "
-        "[aria-label='User menu'] span, "
-        "[aria-label='User menu'], "
-        "[data-testid='user-profile-button'], "
-        "div[data-slot='sidebar-footer'] span.truncate, "
-        "div[data-slot='sidebar-footer'] [role='button'] span"
-    )
-    ignored_keywords = [
-        "user", "user menu", "user profile", "profile", "account",
-        "log in", "sign up", "sign in", "settings", "menu", "help",
-        "continue", "next", "confirm", "submit", "meta", "meta ai"
-    ]
-    for p in context.pages:
-        try:
-            if p.is_closed():
-                continue
-            el = p.locator(user_menu_combined).first
-            if await el.is_visible(timeout=150):
-                text = (await el.inner_text()).strip()
-                if text:
-                    for line in [l.strip() for l in text.splitlines() if l.strip()]:
-                        if line.lower() not in ignored_keywords and len(line) >= 2:
-                            return line
-        except Exception:
-            pass
-    return None
-
-async def check_meta_success_state(context: BrowserContext) -> tuple[bool, str]:
-    for p in context.pages:
-        try:
-            if p.is_closed():
-                continue
-            url = p.url.lower()
-            parsed = urllib.parse.urlparse(url)
-            path = parsed.path.lower()
-
-            if ("invalid_redirect" in url or "error=" in url or 
-                "privacy" in path or "cookies" in path or "consent" in path or
-                "privacy" in url or "consent" in url or "user_cookie_choice" in url):
-                continue
-
-            if await p.locator("[role='button']:has-text('Use mobile number'), input[placeholder*='Mobile' i], input[type='password'], input[name='contact'], :has-text('Continue with Facebook'), :has-text('Enter the code'), :has-text('Check your email')").count() > 0:
-                continue
-
-            if path in ["/language", "/language/", "/settings", "/settings/", "/recover/success", "/recover/success/"] or "recover/success" in path or "recover/success" in url:
-                uname = await extract_meta_username(context) or "Meta_User"
-                return True, uname
-
-            if "meta.ai" in url and "auth.meta.com" not in url:
-                uname = await extract_meta_username(context) or "Meta_User"
-                return True, uname
-
-            if await p.locator(":has-text('Reviewing your info'), :has-text('We\\'re reviewing your info'), :has-text('Thank you for submitting'), :has-text('You submitted an appeal'), :has-text('Check back here')").count() > 0:
-                uname = await extract_meta_username(context) or "Meta_User"
-                return True, uname
-
-            if await p.locator("a:has-text('Log Out'), button:has-text('Log Out'), [role='button']:has-text('Log Out'), a:has-text('LOG OUT'), button:has-text('LOG OUT')").count() > 0:
-                if await p.locator("input[type='password'], input[name='contact']").count() == 0:
-                    uname = await extract_meta_username(context) or "Meta_User"
-                    return True, uname
-
-            uname = await extract_meta_username(context)
-            if uname:
-                return True, uname
-        except Exception:
-            pass
-
-    return False, ""
-
-async def handle_recaptcha_2captcha(page: Page, context: BrowserContext, instance_name="") -> bool:
-    try:
-        pages_to_check = [page] + [p for p in context.pages if p != page and not p.is_closed()]
-        for p in pages_to_check:
-            try:
-                if p.is_closed():
-                    continue
-
-                url = p.url.lower()
-                is_captcha_page = False
-                if any(k in url for k in ["checkpoint", "challenge", "human", "confirm", "auth.meta.com"]):
-                    is_captcha_page = True
-
-                if not is_captcha_page:
-                    if await p.locator(":has-text(\"Confirm you're human\"), :has-text(\"Confirm you’re human\"), :has-text(\"Confirm that you're human\"), :has-text(\"Confirm that you’re human\"), :has-text('I\\'m not a robot'), :has-text('I’m not a robot'), iframe[src*='recaptcha'], iframe[title*='reCAPTCHA'], iframe[title*='recaptcha'], .captcha-solver, [class*='captcha-solver'], :has-text('Solve with 2Captcha')").count() > 0:
-                        is_captcha_page = True
-
-                if not is_captcha_page:
-                    continue
-
-                # 1. Search for 2Captcha solver button across page and all frames
-                solver_loc = None
-                target_container = p
-                solver_selectors = [
-                    '.captcha-solver',
-                    'div.captcha-solver',
-                    'button.captcha-solver',
-                    '[class*="captcha-solver"]',
-                    '[data-state="ready"]',
-                    '[data-state="idle"]',
-                    'div[role="button"]:has-text("Solve with 2Captcha")',
-                    'button:has-text("Solve with 2Captcha")',
-                    'div:has-text("Solve with 2Captcha")',
-                    'span:has-text("Solve with 2Captcha")'
-                ]
-
-                for _ in range(8):
-                    for sel in solver_selectors:
-                        try:
-                            loc = p.locator(sel).first
-                            if await loc.is_visible(timeout=300):
-                                solver_loc = loc
-                                target_container = p
-                                break
-                        except Exception:
-                            pass
-
-                    if not solver_loc:
-                        for frame in p.frames:
-                            try:
-                                for sel in solver_selectors:
-                                    loc = frame.locator(sel).first
-                                    if await loc.is_visible(timeout=250):
-                                        solver_loc = loc
-                                        target_container = frame
-                                        break
-                                if solver_loc:
-                                    break
-                            except Exception:
-                                continue
-
-                    if solver_loc:
-                        break
-                    await asyncio.sleep(0.5)
-
-                # If 2Captcha button is present, click it and wait for solution
-                if solver_loc:
-                    state = (await solver_loc.get_attribute("data-state") or "").lower()
-                    btn_text = ""
-                    try:
-                        btn_text = (await solver_loc.inner_text()).strip()
-                    except Exception:
-                        pass
-
-                    if "solved" not in btn_text.lower() and state != "solved":
-                        log("2CAPTCHA", f"Found 2Captcha button (state='{state}', text='{btn_text}'). Triggering solver...", instance_name=instance_name)
-
-                        # Scroll and Click with all methods
-                        try:
-                            await solver_loc.scroll_into_view_if_needed(timeout=1000)
-                        except Exception:
-                            pass
-
-                        clicked = False
-                        try:
-                            await solver_loc.click(timeout=1500)
-                            clicked = True
-                        except Exception:
-                            pass
-
-                        if not clicked:
-                            try:
-                                box = await solver_loc.bounding_box()
-                                if box:
-                                    await p.mouse.click(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
-                                    clicked = True
-                            except Exception:
-                                pass
-
-                        if not clicked:
-                            try:
-                                await solver_loc.click(force=True, timeout=1500)
-                                clicked = True
-                            except Exception:
-                                pass
-
-                        # Fallback: JavaScript DOM evaluation click
-                        try:
-                            await target_container.evaluate('''() => {
-                                const btn = document.querySelector('.captcha-solver') || 
-                                            Array.from(document.querySelectorAll('*')).find(e => (e.innerText || '').includes('Solve with 2Captcha'));
-                                if (btn) {
-                                    btn.scrollIntoView({block: 'center'});
-                                    ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(evt => {
-                                        btn.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true, view: window }));
-                                    });
-                                    if (typeof btn.click === 'function') btn.click();
-                                }
-                            }''')
-                        except Exception:
-                            pass
-
-                        log("2CAPTCHA", "Waiting for 2Captcha solver to solve reCAPTCHA (up to 60s)...", instance_name=instance_name)
-
-                        # Wait loop for captcha solving
-                        for _ in range(60):
-                            await asyncio.sleep(1)
-                            try:
-                                curr_t = (await solver_loc.inner_text()).lower()
-                                curr_s = (await solver_loc.get_attribute("data-state") or "").lower()
-                                if "solved" in curr_t or curr_s == "solved":
-                                    log("2CAPTCHA", ">>> Captcha solved successfully (data-state='solved')! <<<", instance_name=instance_name)
-                                    break
-                            except Exception:
-                                pass
-
-                            # Check if Continue button became enabled on page
-                            cont_check = p.locator("button:has-text('Continue'), div[role='button']:has-text('Continue'), button[type='submit']").first
-                            try:
-                                if await cont_check.is_visible(timeout=100):
-                                    aria_dis = await cont_check.get_attribute("aria-disabled")
-                                    if aria_dis != "true" and not await cont_check.is_disabled():
-                                        log("2CAPTCHA", ">>> Continue button enabled! Captcha solved. <<<", instance_name=instance_name)
-                                        break
-                            except Exception:
-                                pass
-
-                        await asyncio.sleep(1.0)
-
-                # Click Continue button after solving
-                continue_combined = [
-                    "div[aria-label='Continue'][role='button']",
-                    "div[role='button']:has-text('Continue')",
-                    "button:has-text('Continue')",
-                    "button[type='submit']",
-                    "button:has-text('Next')",
-                    "div[role='button']:has-text('Next')"
-                ]
-                for _ in range(5):
-                    for sel in continue_combined:
-                        try:
-                            cont_btn = p.locator(sel).first
-                            if await cont_btn.is_visible(timeout=500):
-                                aria_dis = await cont_btn.get_attribute("aria-disabled")
-                                if aria_dis != "true" and not await cont_btn.is_disabled():
-                                    log("2CAPTCHA", f"Clicking active 'Continue' button: '{sel}'...", instance_name=instance_name)
-                                    try:
-                                        await cont_btn.scroll_into_view_if_needed(timeout=500)
-                                    except Exception:
-                                        pass
-                                    try:
-                                        await cont_btn.click(timeout=1000)
-                                    except Exception:
-                                        await cont_btn.click(force=True, timeout=1000)
-                                    await asyncio.sleep(1.5)
-                                    return True
-                        except Exception:
-                            pass
-                    await asyncio.sleep(0.5)
-
-            except Exception:
-                continue
-    except Exception as e:
-        log("2CAPTCHA-DEBUG", f"2Captcha handler note: {e}", instance_name=instance_name)
-    return False
-
-async def try_auto_upload_image(target_page: Page, instance_name="") -> bool:
-    try:
-        if target_page.is_closed():
-            return False
-
-        current_url = target_page.url.lower()
-        if not ("auth.meta.com" in current_url or "challenge" in current_url or "checkpoint" in current_url or "human" in current_url):
-            return False
-
-        upload_inputs = target_page.locator("input.x1s85apg, div.xeq5yr9 input[type='file'], input[type='file'], input[accept*='image']").first
-        if not await upload_inputs.is_visible(timeout=300) and await target_page.locator("input[type='file']").count() == 0:
-            return False
-
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        images_dir = os.path.join(base_dir, "images")
-        if not os.path.exists(images_dir):
-            images_dir = os.path.join(os.getcwd(), "images")
-
-        img_file = None
-        if os.path.exists(images_dir):
-            all_imgs = [os.path.join(images_dir, f) for f in os.listdir(images_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
-            if all_imgs:
-                img_file = random.choice(all_imgs)
-
-        if not img_file or not os.path.exists(img_file):
-            return False
-
-        log("IMG-UPLOAD", f"Preparing to upload selfie image from: {os.path.basename(img_file)}", instance_name)
-        input_elem = target_page.locator("input.x1s85apg, div.xeq5yr9 input[type='file'], input[type='file']").first
-        if await input_elem.count() > 0:
-            await input_elem.set_input_files(img_file)
-            log("IMG-UPLOAD", f"Set input files successfully for {os.path.basename(img_file)}!", instance_name)
-        else:
-            async with target_page.expect_file_chooser(timeout=5000) as fc_info:
-                trigger_btn = target_page.locator("span:has-text('Upload Image'), div[aria-label='Upload Image'], button:has-text('Upload Image'), [role='button']:has-text('Upload Image')").first
-                await trigger_btn.click()
-            file_chooser = await fc_info.value
-            await file_chooser.set_files(img_file)
-            log("IMG-UPLOAD", f"Uploaded image via FileChooser: {os.path.basename(img_file)}!", instance_name)
-
-        await asyncio.sleep(2.0)
-        return True
-    except Exception as e:
-        if "closed" not in str(e).lower():
-            log("IMG-WARN", f"Auto image upload note: {e}", instance_name)
-    return False
-
-async def click_checkpoint_continue_button(page: Page, instance_name: str = "") -> bool:
-    """Click any active Continue, Next, or Submit button on checkpoint/challenge pages with multi-method firing."""
-    try:
-        if page.is_closed():
-            return False
-
-        # First, check if there are unselected radio buttons or options on the checkpoint page that need to be clicked first
-        try:
-            radio_handled = await page.evaluate('''() => {
-                const radios = Array.from(document.querySelectorAll("input[type='radio'], div[role='radio'], [role='checkbox'], div[data-visualcompletion='ignore-dynamic']"));
-                for (const r of radios) {
-                    const isChecked = r.checked || r.getAttribute('aria-checked') === 'true';
-                    if (!isChecked && r.offsetParent !== null) {
-                        r.click();
-                        return true;
-                    }
-                }
-                return false;
-            }''')
-            if radio_handled:
-                log("ACTION", "Auto-selected unselected radio/option on checkpoint page!", instance_name=instance_name)
-                await asyncio.sleep(0.5)
-        except Exception:
-            pass
-
-        continue_selectors = [
-            "div[aria-label='Continue'][role='button']",
-            "div[role='button']:has-text('Continue')",
-            "button:has-text('Continue')",
-            "div[role='button']:has-text('Continue as')",
-            "button:has-text('Continue as')",
-            "button[type='submit']",
-            "button:has-text('Next')",
-            "div[role='button']:has-text('Next')",
-            "button:has-text('Submit')",
-            "div[role='button']:has-text('Submit')",
-            "div[role='button']:has-text('Confirm')",
-            "button:has-text('Confirm')",
-            "div[role='button']:has-text('Yes, continue')",
-            "div[role='button']:has-text('This was me')",
-            "div[role='button']:has-text('I agree')",
-            "button:has-text('I agree')",
-            "span:has-text('Continue')",
-            "a:has-text('Continue')"
-        ]
-
-        for sel in continue_selectors:
-            try:
-                loc = page.locator(sel).first
-                if await loc.is_visible(timeout=200):
-                    aria_dis = await loc.get_attribute("aria-disabled")
-                    if aria_dis != "true" and not await loc.is_disabled():
-                        log("ACTION", f"Clicking active Checkpoint button: '{sel}'...", instance_name=instance_name)
-
-                        # 1. Scroll into view
-                        try:
-                            await loc.scroll_into_view_if_needed(timeout=500)
-                        except Exception:
-                            pass
-
-                        # 2. Try standard Playwright click
-                        clicked = False
-                        try:
-                            await loc.click(timeout=800)
-                            clicked = True
-                        except Exception:
-                            pass
-
-                        # 3. If standard click failed or wasn't enough, try coordinates click on bounding box
-                        if not clicked:
-                            try:
-                                box = await loc.bounding_box()
-                                if box:
-                                    await page.mouse.click(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
-                                    clicked = True
-                            except Exception:
-                                pass
-
-                        # 4. Try force click
-                        if not clicked:
-                            try:
-                                await loc.click(force=True, timeout=800)
-                                clicked = True
-                            except Exception:
-                                pass
-
-                        # 5. Try keyboard Enter/Space focus
-                        try:
-                            await loc.focus(timeout=300)
-                            await page.keyboard.press("Enter")
-                        except Exception:
-                            pass
-
-                        await asyncio.sleep(1.0)
-                        return True
-            except Exception:
-                pass
-
-        # JavaScript evaluation fallback: comprehensive React-friendly event dispatch
-        clicked_js = await page.evaluate('''() => {
-            const buttons = Array.from(document.querySelectorAll("div[role='button'], button, [role='button'], a, input[type='submit'], span"));
-            for (const b of buttons) {
-                const txt = (b.innerText || b.textContent || b.value || '').trim().toLowerCase();
-                const disabled = b.getAttribute('aria-disabled') === 'true' || b.disabled;
-                const hidden = b.closest('[aria-hidden="true"]') || b.offsetParent === null;
-
-                const matches = txt === 'continue' || txt === 'next' || txt === 'submit' || txt === 'confirm' || 
-                                txt.includes('continue as') || txt === 'i agree' || txt === 'yes, continue' || 
-                                txt === 'this was me' || txt.startsWith('continue');
-
-                if (matches && !disabled && !hidden) {
-                    try { b.scrollIntoView({block: 'center', inline: 'center'}); } catch(e) {}
-                    try { b.focus(); } catch(e) {}
-
-                    const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
-                    events.forEach(eventType => {
-                        const evt = new MouseEvent(eventType, {
-                            bubbles: true,
-                            cancelable: true,
-                            view: window,
-                            buttons: 1
-                        });
-                        b.dispatchEvent(evt);
-                    });
-                    if (typeof b.click === 'function') {
-                        b.click();
-                    }
-                    return true;
-                }
-            }
-            return false;
-        }''')
-        if clicked_js:
-            log("ACTION", "Clicked Checkpoint button via JavaScript DOM evaluation!", instance_name=instance_name)
-            await asyncio.sleep(1.0)
-            return True
-
-    except Exception:
-        pass
-    return False
-
-async def handle_human_verification(page: Page, context: BrowserContext, email="", password="", instance_name=""):
-    log("CHECKPOINT-FLOW", "Starting Checkpoint & Verification Handover...", instance_name)
-
-    checkpoint_page = await get_active_meta_page(context, default_page=page)
-
-    current_url = checkpoint_page.url.lower() if checkpoint_page and not checkpoint_page.is_closed() else ""
-    if not any(k in current_url for k in ["checkpoint", "challenge", "human", "auth.meta.com/recover"]):
-        log("CHECKPOINT-NAV", f"Opening checkpoint URL: {CHECKPOINT_REDIRECT_URL}", instance_name=instance_name)
-        try:
-            await checkpoint_page.goto(CHECKPOINT_REDIRECT_URL, wait_until="domcontentloaded", timeout=20000)
-        except Exception as e:
-            log("CHECKPOINT-WARN", f"Checkpoint navigation note: {e}", instance_name=instance_name)
-    else:
-        log("CHECKPOINT-NAV", f"Already on checkpoint page: {current_url}", instance_name=instance_name)
-
-    await asyncio.sleep(1.5)
-    await handle_cookie_banners(checkpoint_page, instance_name=instance_name)
-    await handle_recaptcha_2captcha(checkpoint_page, context, instance_name=instance_name)
-
-    for p in context.pages:
-        clicked_card = await try_click_saved_account_card(p, instance_name=instance_name)
-        if clicked_card:
-            await asyncio.sleep(1.0)
-            break
-
-    pipeline_start = time.time()
-    img_uploaded = False
-    post_upload_timer_start = None
-    detected_user = None
-
-    while time.time() - pipeline_start < 180:
-        active_page = await get_active_meta_page(context, default_page=checkpoint_page)
-
-        # 1. Dismiss cookies
-        await handle_cookie_banners(active_page, instance_name=instance_name)
-
-        # 2. 2Captcha solver
-        await handle_recaptcha_2captcha(active_page, context, instance_name=instance_name)
-
-        # 3. Selfie upload
-        if not img_uploaded:
-            img_uploaded = await try_auto_upload_image(active_page, instance_name=instance_name)
-            if img_uploaded:
-                post_upload_timer_start = time.time()
-                log("IMG-UPLOAD", ">>> Selfie image uploaded! Max 30s finalize timer started... <<<", instance_name=instance_name)
-
-        # 4. Saved account card / Continue button clicks
-        await try_click_saved_account_card(active_page, instance_name=instance_name)
-        await click_checkpoint_continue_button(active_page, instance_name=instance_name)
-        await handle_save_login_info_prompt(active_page, context, instance_name=instance_name)
-
-        # 5. Check success
-        is_success, uname = await check_meta_success_state(context)
-        if is_success:
-            detected_user = uname
-            log("SUCCESS", f">>> Registration & Verification SUCCESS detected ({uname})! <<<", instance_name=instance_name)
-            break
-
-        # 6. 15s timeout after selfie upload
-        if post_upload_timer_start is not None:
-            elapsed = time.time() - post_upload_timer_start
-            if elapsed >= 15:
-                log("SUCCESS", f">>> 15s elapsed after image upload. Marking SUCCESS! <<<", instance_name=instance_name)
-                break
-
-        await asyncio.sleep(1.0)
-
-    log("HUMAN-VERIFY", "Verification pipeline finished.", instance_name)
-    await asyncio.sleep(1.0)
-    return True
-
-def cleanup_profile_locks(profile_dir: str):
-    if not os.path.exists(profile_dir):
-        return
-    lock_names = {"LOCK", "SingletonLock", "SingletonCookie", "SingletonSocket", "lock", ".parentlock", "parent.lock"}
-    for root_dir, _, files in os.walk(profile_dir):
-        for f in files:
-            if f in lock_names or f.endswith(".lock") or "Singleton" in f or f == ".parentlock" or f.endswith(".pma"):
-                try:
-                    os.remove(os.path.join(root_dir, f))
-                except Exception:
-                    pass
-
-def clean_profile_except_extensions(profile_dir: str):
-    if not os.path.exists(profile_dir):
-        return
-
-    root_items_to_remove = [
-        'BrowserMetrics', 'Crashpad', 'CrashpadMetrics', 'first_party_sets.db',
-        'first_party_sets.db-journal', 'GPUPersistentCache', 'GrShaderCache',
-        'Safe Browsing', 'segmentation_platform', 'ShaderCache', 'Variations',
-        'LOCK', 'SingletonLock', 'SingletonCookie', 'SingletonSocket',
-        'lock', '.parentlock', 'parent.lock'
-    ]
-
-    try:
-        for item in os.listdir(profile_dir):
-            if item == 'Default' or 'exten' in item.lower() or item == 'Local State':
-                continue
-            p = os.path.join(profile_dir, item)
-            if any(item.startswith(x) for x in root_items_to_remove) or item.endswith('.pma') or item.endswith('.lock') or 'Singleton' in item:
-                try:
-                    if os.path.isdir(p):
-                        shutil.rmtree(p, ignore_errors=True)
-                    else:
-                        os.remove(p)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-    default_dir = os.path.join(profile_dir, 'Default')
-    if os.path.exists(default_dir):
-        preserved_names = {
-            'extension rules', 'extension scripts', 'extension state',
-            'extensions', 'local extension settings', 'sync extension settings',
-            'managed extension settings', 'preferences', 'secure preferences'
-        }
-        try:
-            for item in os.listdir(default_dir):
-                item_lower = item.lower()
-                if item_lower in preserved_names or 'extension' in item_lower:
-                    continue
-                p = os.path.join(default_dir, item)
-                try:
-                    if os.path.isdir(p):
-                        shutil.rmtree(p, ignore_errors=True)
-                    else:
-                        os.remove(p)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    cleanup_profile_locks(profile_dir)
-
-def find_base_chrome_profile() -> Optional[str]:
-    """Finds existing base chrome profile containing extensions."""
-    search_dirs = [
-        os.path.join(os.path.dirname(__file__), "chrome_profile"),
-        os.path.join(os.path.dirname(__file__), "..", "chrome_profile"),
-        os.path.join(os.path.dirname(__file__), "chrome_profiles", "profile_Inst-1"),
-        os.path.join(os.path.dirname(__file__), "..", "chrome_profiles", "profile_Inst-1"),
-        os.path.join(os.path.dirname(__file__), "chrome_profile_taskly"),
-        os.path.join(os.path.dirname(__file__), "..", "chrome_profile_taskly"),
-    ]
-    for d in search_dirs:
-        norm = os.path.abspath(d)
-        if os.path.exists(norm) and os.path.exists(os.path.join(norm, "Default", "Extensions")):
-            return norm
-    for d in search_dirs:
-        norm = os.path.abspath(d)
-        if os.path.exists(norm):
-            return norm
-    return None
-
-def get_unpacked_extension_path(user_data_dir: str) -> Optional[str]:
-    """Finds unpacked 2Captcha extension path with manifest.json."""
-    search_roots = [
-        user_data_dir,
-        os.path.join(os.path.dirname(__file__), "chrome_profile"),
-        os.path.join(os.path.dirname(__file__), "..", "chrome_profile"),
-        os.path.join(os.path.dirname(__file__), "chrome_profiles", "profile_Inst-1"),
-        os.path.join(os.path.dirname(__file__), "..", "chrome_profiles", "profile_Inst-1"),
-    ]
-    for r in search_roots:
-        if not os.path.exists(r):
-            continue
-        pattern = os.path.join(r, "Default", "Extensions", "*", "*")
-        for p in glob.glob(pattern):
-            if os.path.isdir(p) and os.path.exists(os.path.join(p, "manifest.json")):
-                return os.path.abspath(p)
-    return None
-
-def get_worker_user_data_dir(instance_name: str) -> str:
-    base_profile = find_base_chrome_profile()
-    profiles_root = os.path.join(os.path.dirname(__file__), "chrome_profiles")
-    os.makedirs(profiles_root, exist_ok=True)
-    worker_dir = os.path.join(profiles_root, f"profile_{instance_name}")
-
-    if not os.path.exists(worker_dir):
-        if base_profile and os.path.exists(base_profile):
-            try:
-                shutil.copytree(
-                    base_profile,
-                    worker_dir,
-                    ignore=shutil.ignore_patterns("LOCK", "LOG*", "Singleton*", "*Cache*", "GPUCache", "Crashpad*", "*.pma")
-                )
-            except Exception as e:
-                log("WORKER-WARN", f"Base profile clone note: {e}", instance_name=instance_name)
-                os.makedirs(worker_dir, exist_ok=True)
-        else:
-            os.makedirs(worker_dir, exist_ok=True)
-
-    # Ensure Extensions and Local Extension Settings are properly populated
-    if base_profile and os.path.exists(base_profile):
-        worker_default = os.path.join(worker_dir, "Default")
-        os.makedirs(worker_default, exist_ok=True)
-        for folder_name in ["Extensions", "Local Extension Settings", "Extension Rules", "Extension Scripts", "Extension State"]:
-            src_f = os.path.join(base_profile, "Default", folder_name)
-            dst_f = os.path.join(worker_default, folder_name)
-            if os.path.exists(src_f) and not os.path.exists(dst_f):
-                try:
-                    shutil.copytree(src_f, dst_f)
-                except Exception:
-                    pass
-        for pref_file in ["Preferences", "Secure Preferences"]:
-            src_p = os.path.join(base_profile, "Default", pref_file)
-            dst_p = os.path.join(worker_default, pref_file)
-            if os.path.exists(src_p) and not os.path.exists(dst_p):
-                try:
-                    shutil.copy2(src_p, dst_p)
-                except Exception:
-                    pass
-
-    clean_profile_except_extensions(worker_dir)
-    return worker_dir
-
-
-# -------------- HYBRID META CREATION TASK (Requests + Browser Handover) --------------
+# -------------- 100% PURE API META CREATION TASK (NO BROWSER NEEDED) --------------
 async def create_meta_account_task(
-    playwright: Playwright,
     first_name: str,
     last_name: str,
     password: str,
     username: str = "",
     instance_name: str = "Inst-1"
 ) -> Tuple[bool, str, str]:
-    user_data_dir = get_worker_user_data_dir(instance_name)
-    cfg = load_config()
-    configured_channel = cfg.get("browser_channel", "chrome")
-    is_headless = cfg.get("headless", HEADLESS)
-    vp_w = int(cfg.get("viewport_width", VIEWPORT_WIDTH))
-    vp_h = int(cfg.get("viewport_height", VIEWPORT_HEIGHT))
-
-    clean_profile_except_extensions(user_data_dir)
-
+    """
+    100% Pure API Meta Account Creator:
+    - Generates temp email via email_service
+    - Registers account directly on auth.meta.com using fast HTTP requests & envelope encryption
+    - Polls and confirms 6-digit OTP via GraphQL
+    - Returns (success, email, mail_token) in seconds!
+    """
     mail_token = ""
     email = ""
     try:
-        # -------------------------------------------------------------
-        # PHASE 1: FAST PURE-REQUEST SIGNUP & OTP CONFIRMATION
-        # -------------------------------------------------------------
-        log("PHASE-1", "Starting pure-request registration (no browser)...", instance_name=instance_name)
+        log("API-META", "Starting 100% pure-request Meta Account registration...", instance_name=instance_name)
         email, _, mail_token = generate_temp_email(instance_name=instance_name)
         if not email:
-            log("ERR", "Failed to generate email.", instance_name=instance_name)
+            log("ERR", "Failed to generate temp email.", instance_name=instance_name)
             return False, "", ""
 
         log("META-INIT", f"Target Email: {email} | Target Password: {password}", instance_name=instance_name)
@@ -2333,7 +858,7 @@ async def create_meta_account_task(
 
         client = MetaAuthClient(instance_name=instance_name)
         if not client.init_session():
-            log("ERR", "Failed to initialize Meta auth request session.", instance_name=instance_name)
+            log("ERR", "Failed to initialize Meta auth API session.", instance_name=instance_name)
             return False, "", ""
 
         # Step 1: Check contact point
@@ -2359,11 +884,11 @@ async def create_meta_account_task(
             clean_ln = re.sub(r'[^a-zA-Z0-9]', '', last_name).lower() or "account"
             chosen_username = f"{clean_fn}{clean_ln}{random.randint(100, 9999)}"
 
-        # Step 5: Validate username handle
+        # Step 5: Validate username handle & agree TOS
         client.check_profile(username=chosen_username)
 
         # Step 6: Submit registration (triggers OTP to email)
-        client.register_save_credentials(
+        reg_resp = client.register_save_credentials(
             email=email,
             password_raw_or_payload=password,
             username=chosen_username,
@@ -2390,102 +915,30 @@ async def create_meta_account_task(
         confirm_resp = client.confirm_email_otp(code=otp_code, email=email)
         log("OTP-CONFIRM", f"Confirmation response: {confirm_resp}", instance_name=instance_name)
 
-        # -------------------------------------------------------------
-        # PHASE 2: BROWSER HANDOVER FOR CHECKPOINT & CAPTCHA SOLVING
-        # -------------------------------------------------------------
-        log("PHASE-2", "Launching stealth browser and injecting session cookies...", instance_name=instance_name)
+        confirm_data = (
+            confirm_resp.get("data", {}).get("confirm_email", {})
+            if isinstance(confirm_resp, dict) and "data" in confirm_resp
+            else (confirm_resp.get("confirm_email", {}) if isinstance(confirm_resp, dict) else {})
+        )
 
-        browser_args = [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-infobars",
-            "--disable-dev-shm-usage",
-            "--no-sandbox",
-            "--disable-gpu-sandbox",
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-            "--disable-ipc-flooding-protection",
-            "--disable-hang-monitor",
-            "--disable-client-side-phishing-detection",
-            "--disable-component-update",
-            "--disable-default-apps",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--password-store=basic",
-            "--use-mock-keychain",
-            f"--window-size={vp_w},{vp_h}"
-        ]
+        is_confirmed = (
+            confirm_data.get("isConfirmed")
+            or confirm_data.get("is_confirmed")
+            or confirm_data.get("accountId")
+            or client.created_user_id
+        )
 
-        context: Optional[BrowserContext] = None
-        channels_to_try = [configured_channel]
-        for ch in ["chrome", "msedge", None]:
-            if ch not in channels_to_try:
-                channels_to_try.append(ch)
-
-        for ch in channels_to_try:
-            try:
-                ch_desc = f"channel='{ch}'" if ch else "Chromium engine"
-                launch_kwargs = {
-                    "user_data_dir": user_data_dir,
-                    "headless": is_headless,
-                    "viewport": {"width": vp_w, "height": vp_h},
-                    "args": browser_args,
-                    "ignore_default_args": ["--disable-extensions", "--enable-automation"]
-                }
-                if ch:
-                    launch_kwargs["channel"] = ch
-
-                context = await playwright.chromium.launch_persistent_context(**launch_kwargs)
-                log("WORKER", f"Browser instance {instance_name} launched successfully with {ch_desc}!", instance_name=instance_name)
-                break
-            except Exception as e:
-                log("WORKER-WARN", f"Browser channel '{ch}' failed ({e}). Trying fallback...", instance_name=instance_name)
-
-        if not context:
-            log("WORKER-ERR", f"Fatal: Could not launch browser for {instance_name}!", instance_name=instance_name)
+        if is_confirmed:
+            log("META-SUCCESS", f"🎉 Meta Account Created & Confirmed 100% via API for {email}!", instance_name=instance_name)
+            return True, email, mail_token
+        else:
+            log("META-WARN", f"Meta confirmation incomplete for {email}. Response: {confirm_resp}", instance_name=instance_name)
             return False, "", ""
 
-        try:
-            # Inject session cookies from requests
-            playwright_cookies = extract_cookies_for_playwright(client.session)
-            if playwright_cookies:
-                try:
-                    await context.add_cookies(playwright_cookies)
-                    log("COOKIE-INJECT", f"Successfully injected {len(playwright_cookies)} session cookies into browser!", instance_name=instance_name)
-                except Exception as c_err:
-                    log("COOKIE-WARN", f"Cookie injection note: {c_err}", instance_name=instance_name)
-
-            page = context.pages[0] if context.pages else await context.new_page()
-
-            # Execute full human verification & checkpoint resolution pipeline
-            hv_ok = await handle_human_verification(page, context, email=email, password=password, instance_name=instance_name)
-            if hv_ok:
-                log("META-SUCCESS", f"Meta AI Account Created Successfully for {email}!", instance_name=instance_name)
-                return True, email, mail_token
-            else:
-                log("META-WARN", f"Verification did not complete for {email}.", instance_name=instance_name)
-                return False, "", ""
-
-        finally:
-            log("CYCLE-CLOSE", "Closing browser context completely...", instance_name=instance_name)
-            try:
-                if context:
-                    for p in list(context.pages):
-                        try:
-                            await p.close()
-                        except Exception:
-                            pass
-                    await context.close()
-            except Exception as close_err:
-                log("CYCLE-WARN", f"Browser context close note: {close_err}", instance_name=instance_name)
-            finally:
-                context = None
-                await asyncio.sleep(0.5)
-                clean_profile_except_extensions(user_data_dir)
-
     except Exception as e:
-        log("META-ERR", f"Meta creation exception: {e}", instance_name=instance_name)
+        log("META-ERR", f"Meta API creation exception: {e}", instance_name=instance_name)
         return False, "", ""
+
 
 # ==============================================================================
 # 📱 ADB এমুলেটর কন্ট্রোল ও সেটিংস (ইউজার এডিটেবল অপশন)
@@ -2493,20 +946,19 @@ async def create_meta_account_task(
 def find_adb():
     """
     👉 পিসিতে ইনস্টল করা ADB (Android Debug Bridge) লোকেশন খুঁজে বের করে।
-    আপনার LDPlayer বা অন্য কোনো এমুলেটরের adb.exe পাথ আলাদা ড্রাইভে থাকলে এখানে নতুন পাথ যোগ করতে পারেন।
     """
     adb_path = shutil.which("adb")
     if adb_path:
         return adb_path
     possible_paths = [
-        r"D:\LDPlayer\LDPlayer14\adb.exe",                                           # LDPlayer 9/14 ডিফল্ট পাথ
+        r"D:\LDPlayer\LDPlayer14\adb.exe",
         r"D:\LDPlayer\LDPlayer9\adb.exe",
         r"C:\LDPlayer\LDPlayer9\adb.exe",
         r"C:\Program Files\LDPlayer\LDPlayer9\adb.exe",
-        r"C:\Program Files\Netease\MuMuPlayer-12.0\shell\adb.exe",                    # MuMu Player 12
+        r"C:\Program Files\Netease\MuMuPlayer-12.0\shell\adb.exe",
         r"C:\Program Files\Netease\MuMuPlayerGlobal-12.0\shell\adb.exe",
         r"C:\Program Files\MuMuPlayer-12.0\shell\adb.exe",
-        r"C:\Program Files\MuMu\emulator\nemu\vbox\adb.exe",                         # MuMu Player 6
+        r"C:\Program Files\MuMu\emulator\nemu\vbox\adb.exe",
         r"C:\Program Files (x86)\MuMu\emulator\nemu\vbox\adb.exe",
         os.path.expanduser(r"~\Desktop\scrcpy-win64-v4.0\adb.exe"),
         os.path.expanduser(r"~\AppData\Local\Android\Sdk\platform-tools\adb.exe"),
@@ -2538,17 +990,63 @@ def get_device_unique_signature(dev_serial):
         pass
     return dev_serial
 
+EMULATOR_PORT_MAP = {
+    "ldplayer": [5555, 5557, 5559, 5561, 5563, 5565, 5567, 5569, 5571, 5573, 5575],
+    "mumu": [7555, 16384, 16416, 16448, 16480, 16512, 16544, 16576, 16608],
+    "nox": [62001, 62025, 62026, 62027, 62028],
+    "memu": [21503, 21513, 21523, 21533, 21543]
+}
+
+def detect_device_emulator_type(dev_serial: str) -> str:
+    """Detects whether an ADB device is LDPlayer, MuMu, Nox, MEmu, or generic."""
+    port = None
+    if ":" in dev_serial:
+        try:
+            port = int(dev_serial.split(":")[-1])
+        except Exception:
+            pass
+
+    if port:
+        for emu_name, ports in EMULATOR_PORT_MAP.items():
+            if port in ports:
+                return emu_name
+
+    if dev_serial.startswith("emulator-"):
+        return "ldplayer"
+
+    try:
+        props = run_adb_command("shell getprop ro.product.model", device_serial=dev_serial) + " " + \
+                run_adb_command("shell getprop ro.product.manufacturer", device_serial=dev_serial)
+        props_lower = props.lower()
+        if "mumu" in props_lower or "nemu" in props_lower:
+            return "mumu"
+        if "ldplayer" in props_lower or "micro-star" in props_lower or "changzhi" in props_lower:
+            return "ldplayer"
+        if "nox" in props_lower or "bignox" in props_lower:
+            return "nox"
+        if "microvirt" in props_lower or "memu" in props_lower:
+            return "memu"
+    except Exception:
+        pass
+
+    return "generic"
+
 def get_unique_devices(emulators_only=True):
     """
-    👉 সক্রিয় এমুলেটর পোর্ট (LDPlayer, MuMu Player, Nox, MEmu) দ্রুত প্যারালালে স্ক্যান ও সঠিক ডুপ্লিকেট রিমুভ করে।
-    একই এমুলেটরের একাধিক পোর্ট চালু থাকলেও বুট/ডিভাইস সিগনেচার দিয়ে ফিল্টার করে সঠিক কাউন্ট রিটার্ন করে।
+    👉 সক্রিয় এমুলেটর পোর্ট (LDPlayer, MuMu, Nox, MEmu) ইউজার কনফিগারেশন অনুযায়ী স্ক্যান ও ফিল্টার করে।
     """
-    ports = [
-        5555, 5557, 5559, 5561, 5563, 5565,                           # LDPlayer standard ports
-        7555, 16384, 16416, 16448, 16480, 16512,                     # MuMu Player
-        62001, 62025, 62026,                                         # Nox Player
-        21503, 21513, 21523                                          # MEmu Player
-    ]
+    cfg = load_config()
+    emu_cfg = cfg.get("emulators", DEFAULT_EMULATOR_CONFIG)
+    
+    enabled_types = [k for k in ["ldplayer", "mumu", "nox", "memu"] if emu_cfg.get(k, False)]
+    custom_ports = emu_cfg.get("custom_ports", [])
+    custom_devices = emu_cfg.get("custom_devices", [])
+
+    # Gather ports ONLY for enabled emulator types
+    ports_to_scan = []
+    for emu in enabled_types:
+        ports_to_scan.extend(EMULATOR_PORT_MAP.get(emu, []))
+    ports_to_scan.extend(custom_ports)
 
     from concurrent.futures import ThreadPoolExecutor
     def _quick_connect(p):
@@ -2557,8 +1055,9 @@ def get_unique_devices(emulators_only=True):
         except Exception:
             pass
 
-    with ThreadPoolExecutor(max_workers=12) as executor:
-        list(executor.map(_quick_connect, ports))
+    if ports_to_scan:
+        with ThreadPoolExecutor(max_workers=14) as executor:
+            list(executor.map(_quick_connect, ports_to_scan))
 
     res = subprocess.run(f'"{ADB_PATH}" devices', shell=True, capture_output=True, encoding='utf-8', errors='ignore')
     lines = res.stdout.strip().splitlines()
@@ -2577,10 +1076,23 @@ def get_unique_devices(emulators_only=True):
             seen_signatures.add(sig)
             unique_devices.append(dev)
 
-    if emulators_only:
-        emu_list = [d for d in unique_devices if "127.0.0.1:" in d or "localhost:" in d or d.startswith("emulator-")]
-        if emu_list:
-            return emu_list
+    # 1. Custom explicit devices filter
+    if custom_devices:
+        filtered = [d for d in unique_devices if d in custom_devices]
+        return filtered
+
+    # 2. Filter by enabled emulator types
+    if emulators_only and enabled_types:
+        filtered_devices = []
+        for dev in unique_devices:
+            dev_type = detect_device_emulator_type(dev)
+            if emu_cfg.get(dev_type, False):
+                filtered_devices.append(dev)
+            elif dev_type == "generic" and ("127.0.0.1:" in dev or "localhost:" in dev or dev.startswith("emulator-")):
+                # Default generic emulator fallback if LDPlayer is on
+                if emu_cfg.get("ldplayer", False):
+                    filtered_devices.append(dev)
+        return filtered_devices
 
     return unique_devices
 
@@ -2609,10 +1121,9 @@ def is_keyboard_visible(device_serial=None, instance_name=""):
     return "mInputShown=true" in out or "mHasSurface=true" in out
 
 def clear_input_field(length=35, device_serial=None, instance_name=""):
-    if is_keyboard_visible(device_serial=device_serial, instance_name=instance_name):
-        run_adb_command("shell input keyevent 123", device_serial=device_serial, instance_name=instance_name)
-        del_keys = " ".join(["67"] * length)
-        run_adb_command(f"shell input keyevent {del_keys}", device_serial=device_serial, instance_name=instance_name)
+    run_adb_command("shell input keyevent 123", device_serial=device_serial, instance_name=instance_name)
+    del_keys = " ".join(["67"] * length)
+    run_adb_command(f"shell input keyevent {del_keys}", device_serial=device_serial, instance_name=instance_name)
 
 def type_text(text, device_serial=None, instance_name="", human_like=False, min_delay=0.04, max_delay=0.12):
     if not text:
@@ -2627,9 +1138,8 @@ def type_text(text, device_serial=None, instance_name="", human_like=False, min_
         run_adb_command(f'shell input text "{escaped}"', device_serial=device_serial, instance_name=instance_name)
 
 def hide_keyboard(device_serial=None, instance_name=""):
-    if is_keyboard_visible(device_serial=device_serial, instance_name=instance_name):
-        run_adb_command("shell input keyevent 111", device_serial=device_serial, instance_name=instance_name)
-        time.sleep(0.4)
+    run_adb_command("shell input keyevent 111", device_serial=device_serial, instance_name=instance_name)
+    time.sleep(0.2)
 
 def parse_bounds(bounds_str):
     match = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
@@ -2699,6 +1209,73 @@ def find_password_field(root):
             if coords:
                 return coords
     return None
+
+def find_code_input_field(root):
+    """
+    Find the Code input box on 'Check your email' screen/modal.
+    Prioritizes:
+    1. EditText nodes in the expected input region (0.35 to 0.80 of screen).
+    2. Node with exact text/content-desc 'Code', 'Enter code', 'Enter the code'.
+    3. Fallback relative coords based on screen style (Facebook page: 0.66, Modal: 0.48).
+    """
+    if root is None:
+        return 270, 460
+    w, h = get_screen_dimensions(root)
+    
+    # 1. Search for EditText node in valid middle region
+    for node in root.iter('node'):
+        cls = node.attrib.get('class', '').lower()
+        if 'edittext' in cls:
+            coords = parse_bounds(node.attrib.get('bounds', ''))
+            if coords and int(h * 0.35) <= coords[1] <= int(h * 0.80):
+                return coords[0], coords[1]
+                
+    # 2. Look for exact "Enter code" / "Code" placeholder text
+    for node in root.iter('node'):
+        t = node.attrib.get('text', '').strip().lower()
+        d = node.attrib.get('content-desc', '').strip().lower()
+        if t in ["enter code", "enter the code", "code"] or d in ["enter code", "enter the code", "code"]:
+            coords = parse_bounds(node.attrib.get('bounds', ''))
+            if coords and int(h * 0.35) <= coords[1] <= int(h * 0.80):
+                return coords[0], coords[1]
+
+    # 3. Fallback based on page style
+    texts = extract_screen_texts(root)
+    blob = " ".join(texts).lower()
+    if "facebook" in blob or "enter code" in blob:
+        return int(w * 0.50), int(h * 0.66)
+    return int(w * 0.50), int(h * 0.48)
+
+def find_input_box(root, hint_patterns=None, default_rx=0.50, default_ry=0.40):
+    if root is None:
+        return int(540 * default_rx), int(960 * default_ry)
+    w, h = get_screen_dimensions(root)
+    if hint_patterns is None:
+        hint_patterns = ["full name", "username", "email", "code", "password"]
+    
+    # 1. Look for node matching any hint_pattern in text, content-desc, or resource-id in the body (0.20 to 0.85)
+    for node in root.iter('node'):
+        t = node.attrib.get('text', '').strip().lower()
+        d = node.attrib.get('content-desc', '').strip().lower()
+        r = node.attrib.get('resource-id', '').strip().lower()
+        comb = f"{t} {d} {r}".strip()
+        coords = parse_bounds(node.attrib.get('bounds', ''))
+        if coords and int(h * 0.20) < coords[1] < int(h * 0.85):
+            for hp in hint_patterns:
+                hp_lower = hp.lower().strip()
+                if hp_lower == t or hp_lower == d or hp_lower in comb:
+                    return coords[0], coords[1]
+
+    # 2. Look for EditText node around the expected vertical position (default_ry +- 0.15)
+    for node in root.iter('node'):
+        cls = node.attrib.get('class', '').lower()
+        if 'edittext' in cls:
+            coords = parse_bounds(node.attrib.get('bounds', ''))
+            if coords and abs(coords[1] - int(h * default_ry)) < int(h * 0.15):
+                return coords[0], coords[1]
+
+    # 3. Fallback to default relative position
+    return int(w * default_rx), int(h * default_ry)
 
 def find_element(root, search_pattern, by_class=None, exact=False):
     if root is None:
@@ -2820,84 +1397,144 @@ def get_android_clipboard(device_serial=None, instance_name=""):
         
     return ""
 
+def is_valid_b32_secret(secret_str: str) -> bool:
+    if not secret_str:
+        return False
+    clean = re.sub(r'[^A-Z0-9]', '', str(secret_str).upper().strip())
+    if len(clean) not in [16, 24, 32]:
+        return False
+    if clean.isdigit():
+        return False
+    forbidden_words = [
+        "CHOOSE", "CONFIRM", "PROTECT", "ACCOUNT", "AUTHENTICAT", "INSTRUCT",
+        "DOWNLOAD", "BARCODE", "RECOGNIZE", "DEVICE", "SETTING", "PASSWORD",
+        "INSTAGRAM", "GOOGLE", "MOBILE", "RECOMMEND", "CONTINUE", "SECURITY",
+        "DETAILS", "PERSONAL", "PROFILE", "WELCOME", "ENTERCODE", "CANCEL",
+        "RELOAD", "REFRESH", "TERMS", "POLICY", "HELP"
+    ]
+    for w in forbidden_words:
+        if w in clean:
+            return False
+    try:
+        totp = pyotp.TOTP(clean)
+        code = totp.now()
+        if code and len(code) == 6 and code.isdigit():
+            return True
+    except Exception:
+        return False
+    return True
+
 def extract_2fa_secret_and_copy(root, device_serial=None, instance_name=""):
     secret_key = ""
     w, h = get_screen_dimensions(root)
 
     def find_key_in_texts(texts_list):
-        ignore_words = {
-            "AUTHENTICATION", "INSTRUCTIONS", "SETTINGSONYOUR", "TWOFACTORAUTH",
-            "INSTAGRAMFROM", "CHANGEPASSWORD", "PASSWORDANDSEC", "ACCOUNTSETTINGS",
-            "PERSONALDETAILS", "LOGGEDINWITH", "DOWNLOADANAPP", "TWOFACTORAUTHENTICATION"
-        }
         for t in texts_list:
             cleaned = re.sub(r'[^A-Z0-9]', '', t.upper())
-            if len(cleaned) in [32, 24, 16] and not cleaned.isdigit():
-                if not any(ign in cleaned for ign in ignore_words):
-                    return cleaned
+            if is_valid_b32_secret(cleaned):
+                return cleaned
 
         blob = " ".join(texts_list).upper()
         m = re.search(r'([A-Z0-9]{4}(?:[\s\n\-]+[A-Z0-9]{4}){7})', blob)
         if m:
             c = re.sub(r'[^A-Z0-9]', '', m.group(1))
-            if len(c) == 32 and not c.isdigit():
+            if is_valid_b32_secret(c):
                 return c
 
         m = re.search(r'([A-Z0-9]{4}(?:[\s\n\-]+[A-Z0-9]{4}){3})', blob)
         if m:
             c = re.sub(r'[^A-Z0-9]', '', m.group(1))
-            if len(c) == 16 and not c.isdigit():
+            if is_valid_b32_secret(c):
                 return c
 
-        chunks = []
-        for word in blob.split():
-            clean_w = re.sub(r'[^A-Z0-9]', '', word)
-            if len(clean_w) == 4 and not clean_w.isdigit() and clean_w not in ["COPY", "NEXT", "INFO", "PAGE", "MORE", "FROM", "META", "HELP", "STEP", "BACK", "TABS", "MENU", "SITE", "WITH"]:
-                chunks.append(clean_w)
-            else:
-                if len(chunks) in [4, 6, 8]:
-                    return "".join(chunks)
-                chunks = []
-        if len(chunks) in [4, 6, 8]:
-            return "".join(chunks)
+        tokens = re.findall(r'\b[A-Z2-7]{16,32}\b', blob)
+        for tok in tokens:
+            if is_valid_b32_secret(tok):
+                return tok
 
         return ""
 
+    def find_real_copy_button(node_root):
+        if node_root is None:
+            return None
+        for node in node_root.iter('node'):
+            t = node.attrib.get('text', '').strip().lower()
+            d = node.attrib.get('content-desc', '').strip().lower()
+            comb = t or d
+            if len(comb) <= 22:
+                if comb in ["copy key", "copy the key", "copy", "copy code", "copy this key"]:
+                    coords = parse_bounds(node.attrib.get('bounds', ''))
+                    if coords:
+                        return coords
+                elif "copy key" in comb or "copy the key" in comb:
+                    coords = parse_bounds(node.attrib.get('bounds', ''))
+                    if coords:
+                        return coords
+        return None
+
+    # Step 1: Check if key is already visible in text
     if root is not None:
         texts = extract_screen_texts(root)
         found = find_key_in_texts(texts)
         if found:
             secret_key = found
             log("2FA-EXTRACT", f"Found Secret Key in UI text: {secret_key}", instance_name=instance_name)
+            return secret_key
 
-    elem_copy = find_element(root, "copy key", exact=True) or find_element(root, "copy key") or find_element(root, "copy")
-    if elem_copy:
-        log("2FA-ACTION", f"Tapping 'Copy key' at ({elem_copy[0]}, {elem_copy[1]})...", instance_name=instance_name)
-        run_adb_command(f"shell input tap {elem_copy[0]} {elem_copy[1]}", device_serial=device_serial, instance_name=instance_name)
-        time.sleep(0.4)
-        run_adb_command(f"shell input tap {elem_copy[0]} {elem_copy[1]}", device_serial=device_serial, instance_name=instance_name)
+    # Step 2: Check if Copy key button is visible directly
+    btn_copy = find_real_copy_button(root)
+    if btn_copy:
+        log("2FA-ACTION", f"Tapping 'Copy key' button at ({btn_copy[0]}, {btn_copy[1]})...", instance_name=instance_name)
+        run_adb_command(f"shell input tap {btn_copy[0]} {btn_copy[1]}", device_serial=device_serial, instance_name=instance_name)
+        time.sleep(0.5)
+        clip = get_android_clipboard(device_serial=device_serial, instance_name=instance_name)
+        if clip:
+            clean_clip = re.sub(r'[^A-Z0-9]', '', clip.upper())
+            if is_valid_b32_secret(clean_clip):
+                secret_key = clean_clip
+                log("2FA-CLIPBOARD", f"✔ Secret Key recovered from clipboard: '{secret_key}'", instance_name=instance_name)
+                return secret_key
     else:
-        log("2FA-ACTION", "Scrolling down to reveal 'Copy key' button...", instance_name=instance_name)
-        run_adb_command(f"shell input swipe {int(w*0.50)} {int(h*0.65)} {int(w*0.50)} {int(h*0.45)} 250", device_serial=device_serial, instance_name=instance_name)
-        time.sleep(1.2)
+        # Step 3: Scroll down past the QR code to reveal the real Copy key button & key text
+        log("2FA-ACTION", "Scrolling down past QR code to reveal 'Copy key' & secret key...", instance_name=instance_name)
+        run_adb_command(f"shell input swipe {int(w*0.50)} {int(h*0.75)} {int(w*0.50)} {int(h*0.25)} 300", device_serial=device_serial, instance_name=instance_name)
+        time.sleep(0.8)
         root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
-        elem_copy = find_element(root, "copy key", exact=True) or find_element(root, "copy key") or find_element(root, "copy")
-        if elem_copy:
-            log("2FA-ACTION", f"Found 'Copy key' after scroll. Tapping ({elem_copy[0]}, {elem_copy[1]})...", instance_name=instance_name)
-            run_adb_command(f"shell input tap {elem_copy[0]} {elem_copy[1]}", device_serial=device_serial, instance_name=instance_name)
+        
+        if root is not None:
+            texts = extract_screen_texts(root)
+            found = find_key_in_texts(texts)
+            if found:
+                secret_key = found
+                log("2FA-EXTRACT", f"Found Secret Key in UI text (after scroll): {secret_key}", instance_name=instance_name)
+                return secret_key
+
+        btn_copy = find_real_copy_button(root)
+        if btn_copy:
+            log("2FA-ACTION", f"Found 'Copy key' after scroll at ({btn_copy[0]}, {btn_copy[1]}). Tapping...", instance_name=instance_name)
+            run_adb_command(f"shell input tap {btn_copy[0]} {btn_copy[1]}", device_serial=device_serial, instance_name=instance_name)
+            time.sleep(0.5)
         else:
-            fx, fy = get_rel_coords(root, 0.24, 0.66)
-            log("2FA-ACTION", f"Tapping relative fallback 'Copy key' at ({fx}, {fy})...", instance_name=instance_name)
+            fx, fy = get_rel_coords(root, 0.50, 0.55)
+            log("2FA-ACTION", f"Tapping fallback position ({fx}, {fy}) for Copy key...", instance_name=instance_name)
             run_adb_command(f"shell input tap {fx} {fy}", device_serial=device_serial, instance_name=instance_name)
+            time.sleep(0.5)
 
-    time.sleep(0.8)
-
-    if not secret_key and root is not None:
-        texts = extract_screen_texts(root)
-        found = find_key_in_texts(texts)
-        if found:
-            secret_key = found
-            log("2FA-EXTRACT", f"Found Secret Key in UI text (Post-scroll): {secret_key}", instance_name=instance_name)
+    # Step 4: Check Android clipboard for key
+    time.sleep(0.3)
+    clip = get_android_clipboard(device_serial=device_serial, instance_name=instance_name)
+    if clip:
+        clean_clip = re.sub(r'[^A-Z0-9]', '', clip.upper())
+        if is_valid_b32_secret(clean_clip):
+            secret_key = clean_clip
+            log("2FA-CLIPBOARD", f"✔ Secret Key recovered from clipboard: '{secret_key}'", instance_name=instance_name)
+            return secret_key
+        elif len(clean_clip) > 16:
+            m = re.search(r'([A-Z2-7]{16,32})', clean_clip)
+            if m and is_valid_b32_secret(m.group(1)):
+                secret_key = m.group(1)
+                log("2FA-CLIPBOARD", f"✔ Secret Key parsed from clipboard: '{secret_key}'", instance_name=instance_name)
+                return secret_key
 
     return secret_key
 
@@ -2951,9 +1588,42 @@ def detect_current_page(root):
         return "UNKNOWN_SCREEN", []
     
     texts = extract_screen_texts(root)
-    text_blob = " ".join(texts).lower()
+    if not text_blob.strip():
+        return "GENERIC_PAGE", texts
+
+    # Check if page is just loading the top toolbar without content
+    meaningful_texts = [t for t in texts if t.strip().lower() not in ['site info', 'two-factor authentication · account settings | meta', 'reload', 'tabs', 'home', 'bookmarks', 'menu', 'back', 'forward', '2', '1', '']]
+    if not meaningful_texts and len(texts) <= 4:
+        return "GENERIC_PAGE", texts
     
-    if ("can't find account" in text_blob 
+    if ("we suspect automated behavior on your account" in text_blob 
+          or "suspect automated behavior" in text_blob 
+          or "automated behavior" in text_blob 
+          or "automated activity" in text_blob 
+          or ("automated" in text_blob and "dismiss" in text_blob)):
+        return "SUSPECT_AUTOMATED_BEHAVIOR_PAGE", texts
+    elif ("this page isn't available right now" in text_blob
+          or "this page isn't available" in text_blob
+          or "this page is not available" in text_blob
+          or "page isn't available right now" in text_blob
+          or "page isn't available" in text_blob
+          or "page is not available" in text_blob
+          or "try reloading this page" in text_blob
+          or ("technical error" in text_blob and "reload" in text_blob)
+          or "reload page" in text_blob):
+        return "PAGE_NOT_AVAILABLE_ERROR_PAGE", texts
+    elif ("use another profile" in text_blob 
+          or "switch accounts" in text_blob 
+          or ("continue" in text_blob and "create new account" in text_blob)
+          or ("continue as" in text_blob and "instagram" in text_blob)):
+        return "INSTAGRAM_CONTINUE_PROFILE_PAGE", texts
+    elif ("re-enter your password" in text_blob
+          or "enter your password" in text_blob
+          or "enter password" in text_blob
+          or ("for your security" in text_blob and "password" in text_blob)
+          or "confirm your password" in text_blob):
+        return "REENTER_PASSWORD_PAGE", texts
+    elif ("can't find account" in text_blob 
         or "cant find account" in text_blob 
         or "we can't find an account" in text_blob 
         or "we cant find an account" in text_blob
@@ -2974,34 +1644,67 @@ def detect_current_page(root):
         return "HOME_SCREEN", texts
     elif "something went wrong" in text_blob or "unable to create an account" in text_blob:
         return "ACCOUNT_ERROR_PAGE", texts
-    elif ("two-factor authentication is on" in text_blob
-          or "two-factor is on" in text_blob
-          or "2-factor authentication is on" in text_blob
-          or "authentication app is on" in text_blob
-          or "two-step verification is on" in text_blob
-          or "authenticator app is on" in text_blob
-          or "two-factor authentication turned on" in text_blob
-          or "two-factor authentication enabled" in text_blob
-          or "two-factor authentication is set up" in text_blob
-          or "your two-factor authentication is set up" in text_blob
-          or ("two-factor" in text_blob and "is set up" in text_blob)
-          or ("backup codes" in text_blob and "two-factor" in text_blob)):
-        return "TWO_FACTOR_SUCCESS_PAGE", texts
-    elif "get your code from your authentication app" in text_blob or "enter the 6-digit code" in text_blob or ("enter code" in text_blob and "next" in text_blob and "instructions for setup" not in text_blob and "scan this" not in text_blob):
-        return "TWO_FACTOR_ENTER_CODE_PAGE", texts
-    elif "instructions for setup" in text_blob or "scan this barcode/qr code" in text_blob or "copy the key" in text_blob or "download an authentication app" in text_blob:
-        return "TWO_FACTOR_INSTRUCTIONS_PAGE", texts
-    elif "set up extra protection for your account" in text_blob or "extra protection for your account" in text_blob or ("extra protection" in text_blob and "get started" in text_blob):
-        return "TWO_FACTOR_EXTRA_PROTECTION_PAGE", texts
     elif ("check your email" in text_blob
           or ("enter the code we sent to" in text_blob and ("continue" in text_blob or "code" in text_blob))
           or "we can send a new code in" in text_blob):
         return "TWO_FACTOR_CHECK_EMAIL_PAGE", texts
-    elif "help protect your account" in text_blob or "choose how to confirm it's you" in text_blob or ("authentication app" in text_blob and "recommended" in text_blob):
+    elif "set up extra protection for your account" in text_blob or "extra protection for your account" in text_blob or ("extra protection" in text_blob and "get started" in text_blob):
+        return "TWO_FACTOR_EXTRA_PROTECTION_PAGE", texts
+    elif ("help protect your account" in text_blob
+          or "help protect" in text_blob
+          or "choose how to confirm it's you" in text_blob
+          or "choose how to confirm" in text_blob
+          or ("authentication app" in text_blob and "sms or whatsapp" in text_blob)
+          or ("authentication app" in text_blob and "recommended" in text_blob and "scan" not in text_blob)):
         return "TWO_FACTOR_CHOOSE_METHOD_PAGE", texts
+    elif ("instructions for setup" in text_blob
+          or "scan this barcode/qr code" in text_blob
+          or "scan this barcode" in text_blob
+          or "scan this qr code" in text_blob
+          or "scan this barcode/qr code or copy the key" in text_blob
+          or "copy the key" in text_blob
+          or "or copy the key" in text_blob
+          or ("instructions" in text_blob and ("setup" in text_blob or "barcode" in text_blob or "qr" in text_blob))):
+        return "TWO_FACTOR_INSTRUCTIONS_PAGE", texts
+    elif ("get your code from your authentication app" in text_blob
+          or "enter the 6-digit code" in text_blob
+          or "enter confirmation code" in text_blob
+          or "enter 6-digit code" in text_blob
+          or "enter code generated" in text_blob
+          or ("enter code" in text_blob and "next" in text_blob and "instructions for setup" not in text_blob and "scan this" not in text_blob and "download an" not in text_blob)):
+        return "TWO_FACTOR_ENTER_CODE_PAGE", texts
+    elif "copy key" in text_blob or "enter key in authenticator app" in text_blob or "set up on same device" in text_blob or "enter this key into" in text_blob:
+        return "TWO_FACTOR_COPY_KEY_PAGE", texts
     elif "choose an account to set up two-factor authentication" in text_blob or ("two-factor authentication" in text_blob and ("choose an account" in text_blob or "instagram" in text_blob) and "instructions" not in text_blob and "help protect" not in text_blob and "is on" not in text_blob):
         return "TWO_FACTOR_CHOOSE_ACCOUNT_PAGE", texts
-    elif "save your login info?" in text_blob or "save your login info" in text_blob or "won't need to enter it next time" in text_blob or "save info" in text_blob:
+    elif (("two-factor authentication is on" in text_blob
+           or "two-factor is on" in text_blob
+           or "2-factor authentication is on" in text_blob
+           or "authentication app is on" in text_blob
+           or "two-step verification is on" in text_blob
+           or "authenticator app is on" in text_blob
+           or "two-factor authentication turned on" in text_blob
+           or "two-factor authentication enabled" in text_blob
+           or "two-factor authentication is set up" in text_blob
+           or "your two-factor authentication is set up" in text_blob
+           or ("backup codes" in text_blob and "two-factor" in text_blob)
+           or ("turn off two-factor" in text_blob or "manage two-factor" in text_blob))
+          and "instructions" not in text_blob
+          and "download an authentication" not in text_blob
+          and "scan this" not in text_blob
+          and "barcode" not in text_blob
+          and "qr code" not in text_blob
+          and "check your email" not in text_blob
+          and "extra protection" not in text_blob
+          and "help protect" not in text_blob
+          and "choose how to confirm" not in text_blob):
+        return "TWO_FACTOR_SUCCESS_PAGE", texts
+    elif ("save your login info" in text_blob 
+          or "save login info" in text_blob 
+          or "won't need to enter it next time" in text_blob 
+          or "wont need to enter it next time" in text_blob 
+          or ("save" in text_blob and "not now" in text_blob)
+          or "save info" in text_blob):
         return "INSTAGRAM_SAVE_INFO_PAGE", texts
     elif "connect to facebook" in text_blob or "find friends to follow" in text_blob:
         return "INSTAGRAM_CONNECT_FB_PAGE", texts
@@ -3032,26 +1735,12 @@ def detect_current_page(root):
     else:
         return "GENERIC_PAGE", texts
 
-def fetch_otp_from_mail_td_service(email, password, max_wait_sec=60, expected_digits=None, instance_name=""):
-    """Log in to Mail.td and poll inbox for Meta security code using mail_td module"""
-    client = mail_td.MailTDClient()
-    try:
-        data = client.login(email, password)
-        acc_id = data.get("id")
-        jwt_token = data.get("token")
-        if acc_id and jwt_token:
-            token_str = f"MAILTD:{acc_id}:{jwt_token}"
-            return mail_td.fetch_otp_mail_td(token_str, max_wait_sec=max_wait_sec, expected_digits=expected_digits, instance_name=instance_name)
-    except Exception as e:
-        log("MAILTD-WARN", f"Mail.td login/poll error for {email}: {e}", instance_name=instance_name)
-    return None
-
 def fetch_email_security_code(email, password, mail_token=None, max_wait_sec=60, expected_digits=8, instance_name=""):
     """
     Universal email security code retriever:
-    Routes to Mail.td to fetch 8-digit security verification OTP for Instagram / 2FA.
+    Routes to configured mail service to fetch 8-digit security verification OTP for Instagram / 2FA.
     """
-    log("EMAIL-CODE", f"Fetching 8-digit security code for {email} (timeout {max_wait_sec}s)...", instance_name=instance_name)
+    log("EMAIL-CODE", f"Fetching email security code for {email} ({expected_digits}-digit expected, timeout {max_wait_sec}s)...", instance_name=instance_name)
     return fetch_otp_from_temp_mail(email, password, token=mail_token, max_wait_sec=max_wait_sec, expected_digits=expected_digits, instance_name=instance_name)
 
 def update_username_in_accounts_center(device_serial: str, target_username: str, instance_name=""):
@@ -3166,7 +1855,7 @@ def update_username_in_accounts_center(device_serial: str, target_username: str,
     return True
 
 # ==============================================================================
-# INSTAGRAM & 2FA AUTOMATION PIPELINE (100% Matching 2fa create w2 save issue fix.py)
+# INSTAGRAM & 2FA AUTOMATION PIPELINE (100% Matching 1tasklytometatoinsta_multi_optimize.py)
 # ==============================================================================
 
 def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, target_login: str, mail_token="", instance_name="Inst-1", task_context=None):
@@ -3299,7 +1988,7 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
                 run_adb_command("shell input keyevent 66", device_serial=device_serial, instance_name=instance_name)
             time.sleep(1.5)
 
-        elif page_name in ["CANNOT_FIND_ACCOUNT_POPUP", "INCORRECT_PASSWORD_POPUP", "ACCOUNT_ERROR_PAGE", "CANNOT_MAKE_CHANGE_POPUP"]:
+        elif page_name in ["CANNOT_FIND_ACCOUNT_POPUP", "INCORRECT_PASSWORD_POPUP", "CANNOT_MAKE_CHANGE_POPUP"]:
             log("STATE-ABORT", f"Account restriction/issue detected '{page_name}'. Terminating current cycle immediately and restarting new task...", instance_name=instance_name)
             run_adb_command(f"shell am force-stop {PACKAGE_NAME}", device_serial=device_serial, instance_name=instance_name)
             return False, ""
@@ -3311,25 +2000,23 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
 
         elif page_name == "INSTAGRAM_LOGIN_PAGE":
             if not login_submitted:
-                log("STATE-ACTION", f"Entering email '{email}' and password...", instance_name=instance_name)
-                elem_user = find_element(root, "username", by_class="EditText") or find_element(root, "email", by_class="EditText") or find_element(root, "phone", by_class="EditText")
-                if elem_user:
-                    run_adb_command(f"shell input tap {elem_user[0]} {elem_user[1]}", device_serial=device_serial, instance_name=instance_name)
-                else:
-                    fx, fy = get_rel_coords(root, 0.5, 0.46)
-                    run_adb_command(f"shell input tap {fx} {fy}", device_serial=device_serial, instance_name=instance_name)
+                log("STATE-ACTION", f"Entering credentials for {email}...", instance_name=instance_name)
+                elem_user = find_input_box(root, hint_patterns=["username, email or mobile number", "phone number, username, or email", "username", "email", "phone", "mobile"], default_rx=0.50, default_ry=0.46)
+                log("STATE-ACTION", f"Entering email '{email}' at ({elem_user[0]}, {elem_user[1]})...", instance_name=instance_name)
+                run_adb_command(f"shell input tap {elem_user[0]} {elem_user[1]}", device_serial=device_serial, instance_name=instance_name)
+                time.sleep(0.15)
+                run_adb_command(f"shell input tap {elem_user[0]} {elem_user[1]}", device_serial=device_serial, instance_name=instance_name)
                 time.sleep(0.3)
                 clear_input_field(device_serial=device_serial, instance_name=instance_name)
                 type_text(email, device_serial=device_serial, instance_name=instance_name)
                 time.sleep(0.3)
 
                 root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
-                elem_pwd = find_password_field(root) or find_element(root, "password", by_class="EditText")
-                if elem_pwd:
-                    run_adb_command(f"shell input tap {elem_pwd[0]} {elem_pwd[1]}", device_serial=device_serial, instance_name=instance_name)
-                else:
-                    fx, fy = get_rel_coords(root, 0.5, 0.58)
-                    run_adb_command(f"shell input tap {fx} {fy}", device_serial=device_serial, instance_name=instance_name)
+                log("STATE-ACTION", "Entering password...", instance_name=instance_name)
+                elem_pwd = find_password_field(root) or find_input_box(root, hint_patterns=["password"], default_rx=0.50, default_ry=0.57)
+                run_adb_command(f"shell input tap {elem_pwd[0]} {elem_pwd[1]}", device_serial=device_serial, instance_name=instance_name)
+                time.sleep(0.15)
+                run_adb_command(f"shell input tap {elem_pwd[0]} {elem_pwd[1]}", device_serial=device_serial, instance_name=instance_name)
                 time.sleep(0.3)
                 clear_input_field(device_serial=device_serial, instance_name=instance_name)
                 type_text(password, device_serial=device_serial, instance_name=instance_name)
@@ -3340,10 +2027,10 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
 
                 root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
                 log("STATE-ACTION", "Submitting login credentials...", instance_name=instance_name)
-                tap_or_fallback_rel(root, "log in", 0.5, 0.67, "Log In Button", exact=True, device_serial=device_serial, instance_name=instance_name)
+                tap_or_fallback_rel(root, "log in", 0.50, 0.67, "Log In Button", exact=True, device_serial=device_serial, instance_name=instance_name)
                 login_submitted = True
                 login_wait_count = 0
-                time.sleep(2.0)
+                time.sleep(2.5)
             else:
                 login_wait_count += 1
                 if login_wait_count >= 3:
@@ -3381,9 +2068,24 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
             time.sleep(1.8)
 
         elif page_name == "INSTAGRAM_NAME_PAGE":
-            log("STATE-ACTION", "'What\\'s your name?' screen -> Tapping 'Next'...", instance_name=instance_name)
-            tap_or_fallback_rel(root, "next", 0.5, 0.68, "Next Button", device_serial=device_serial, instance_name=instance_name)
-            time.sleep(1.5)
+            log("STATE-ACTION", f"'What\\'s your name?' screen -> Filling name with '{target_login}'...", instance_name=instance_name)
+            nx, ny = find_input_box(root, hint_patterns=["full name"], default_rx=0.50, default_ry=0.40)
+            log("STATE-ACTION", f"Targeting Full name input at ({nx}, {ny}). Tapping to focus...", instance_name=instance_name)
+            run_adb_command(f"shell input tap {nx} {ny}", device_serial=device_serial, instance_name=instance_name)
+            time.sleep(0.15)
+            run_adb_command(f"shell input tap {nx} {ny}", device_serial=device_serial, instance_name=instance_name)
+            time.sleep(0.3)
+            clear_input_field(length=40, device_serial=device_serial, instance_name=instance_name)
+            time.sleep(0.15)
+            type_text(target_login, device_serial=device_serial, instance_name=instance_name, human_like=True)
+            time.sleep(0.3)
+            hide_keyboard(device_serial=device_serial, instance_name=instance_name)
+            time.sleep(0.2)
+
+            root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
+            log("STATE-ACTION", "Tapping 'Next' on Name screen...", instance_name=instance_name)
+            tap_or_fallback_rel(root, "next", 0.50, 0.51, "Next Button", exact=True, device_serial=device_serial, instance_name=instance_name)
+            time.sleep(1.8)
 
         elif page_name == "INSTAGRAM_USERNAME_PAGE":
             text_blob_curr = " ".join(visible_texts).lower()
@@ -3392,95 +2094,41 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
                 "another account", "try another", "can't use", "cant use"
             ])
 
-            if not username_attempted:
-                log("STATE-ACTION", f"'Create a username' screen -> Overwriting with Taskly username: '{target_login}'...", instance_name=instance_name)
-                elem_uname = find_element(root, "username", by_class="EditText") or find_element(root, "create a username", by_class="EditText")
-                if elem_uname:
-                    run_adb_command(f"shell input tap {elem_uname[0]} {elem_uname[1]}", device_serial=device_serial, instance_name=instance_name)
-                else:
-                    fx, fy = get_rel_coords(root, 0.5, 0.44)
-                    run_adb_command(f"shell input tap {fx} {fy}", device_serial=device_serial, instance_name=instance_name)
-                time.sleep(0.3)
-                clear_input_field(length=40, device_serial=device_serial, instance_name=instance_name)
-                time.sleep(0.2)
-                type_text(target_login, device_serial=device_serial, instance_name=instance_name, human_like=True)
-                time.sleep(0.4)
+            if is_uname_error:
+                log("USERNAME-WARN", f"Username '{target_login}' not accepted (Error shown)! Navigating Back (<) to regenerate auto-suggested username...", instance_name=instance_name)
                 hide_keyboard(device_serial=device_serial, instance_name=instance_name)
-                time.sleep(0.2)
+                time.sleep(0.3)
+                
+                back_btn = find_element(root, "back") or find_element(root, "go back")
+                if back_btn:
+                    run_adb_command(f"shell input tap {back_btn[0]} {back_btn[1]}", device_serial=device_serial, instance_name=instance_name)
+                else:
+                    fx_b, fy_b = get_rel_coords(root, 0.06, 0.19)
+                    run_adb_command(f"shell input tap {fx_b} {fy_b}", device_serial=device_serial, instance_name=instance_name)
+                    run_adb_command("shell input keyevent 4", device_serial=device_serial, instance_name=instance_name)
+                time.sleep(1.2)
 
                 root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
+                p_name, _ = detect_current_page(root)
+                if p_name == "INSTAGRAM_NAME_PAGE":
+                    log("STATE-ACTION", "On Name screen -> Tapping 'Next' to trigger auto username...", instance_name=instance_name)
+                    tap_or_fallback_rel(root, "next", 0.50, 0.51, "Next Button", exact=True, device_serial=device_serial, instance_name=instance_name)
+                    time.sleep(1.5)
+
+                root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
+                log("STATE-ACTION", "On Username screen with auto-filled value -> Tapping 'Next'...", instance_name=instance_name)
+                hide_keyboard(device_serial=device_serial, instance_name=instance_name)
+                time.sleep(0.2)
+                tap_or_fallback_rel(root, "next", 0.5, 0.60, "Next Button", exact=True, device_serial=device_serial, instance_name=instance_name)
+                auto_username_used = True
+                time.sleep(1.8)
+            else:
+                log("STATE-ACTION", f"'Create a username' screen -> Pre-filled from Full Name. Tapping 'Next'...", instance_name=instance_name)
+                hide_keyboard(device_serial=device_serial, instance_name=instance_name)
+                time.sleep(0.2)
                 tap_or_fallback_rel(root, "next", 0.5, 0.60, "Next Button", exact=True, device_serial=device_serial, instance_name=instance_name)
                 username_attempted = True
                 time.sleep(1.8)
-
-                # Check if username is rejected ("choose a username to continue" / "not available" / still on page)
-                root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
-                new_page, new_texts = detect_current_page(root)
-                new_text_blob = " ".join(new_texts).lower()
-
-                has_err = any(err in new_text_blob for err in [
-                    "choose a username", "not available", "isn't available", "isnt available",
-                    "another account", "try another", "can't use", "cant use"
-                ])
-
-                if has_err or new_page == "INSTAGRAM_USERNAME_PAGE":
-                    log("USERNAME-WARN", f"Username '{target_login}' not accepted (Error shown)! Navigating Back (<) to regenerate auto-suggested username...", instance_name=instance_name)
-                    hide_keyboard(device_serial=device_serial, instance_name=instance_name)
-                    time.sleep(0.3)
-                    
-                    # Tap top-left back arrow (<) or keyevent 4
-                    back_btn = find_element(root, "back") or find_element(root, "go back")
-                    if back_btn:
-                        run_adb_command(f"shell input tap {back_btn[0]} {back_btn[1]}", device_serial=device_serial, instance_name=instance_name)
-                    else:
-                        fx_b, fy_b = get_rel_coords(root, 0.06, 0.19)
-                        run_adb_command(f"shell input tap {fx_b} {fy_b}", device_serial=device_serial, instance_name=instance_name)
-                        run_adb_command("shell input keyevent 4", device_serial=device_serial, instance_name=instance_name)
-                    time.sleep(1.2)
-
-                    root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
-                    p_name, _ = detect_current_page(root)
-                    if p_name == "INSTAGRAM_NAME_PAGE":
-                        log("STATE-ACTION", "On Name screen -> Tapping 'Next' to trigger auto username...", instance_name=instance_name)
-                        tap_or_fallback_rel(root, "next", 0.5, 0.68, "Next Button", device_serial=device_serial, instance_name=instance_name)
-                        time.sleep(1.5)
-
-                    root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
-                    log("STATE-ACTION", "On Username screen with auto-filled value -> Tapping 'Next'...", instance_name=instance_name)
-                    hide_keyboard(device_serial=device_serial, instance_name=instance_name)
-                    time.sleep(0.2)
-                    tap_or_fallback_rel(root, "next", 0.5, 0.60, "Next Button", exact=True, device_serial=device_serial, instance_name=instance_name)
-                    auto_username_used = True
-                    time.sleep(1.8)
-            else:
-                if is_uname_error:
-                    log("USERNAME-WARN", "Username error detected on retry! Navigating Back (<) and Next for auto-username...", instance_name=instance_name)
-                    hide_keyboard(device_serial=device_serial, instance_name=instance_name)
-                    time.sleep(0.3)
-
-                    back_btn = find_element(root, "back") or find_element(root, "go back")
-                    if back_btn:
-                        run_adb_command(f"shell input tap {back_btn[0]} {back_btn[1]}", device_serial=device_serial, instance_name=instance_name)
-                    else:
-                        fx_b, fy_b = get_rel_coords(root, 0.06, 0.19)
-                        run_adb_command(f"shell input tap {fx_b} {fy_b}", device_serial=device_serial, instance_name=instance_name)
-                        run_adb_command("shell input keyevent 4", device_serial=device_serial, instance_name=instance_name)
-                    time.sleep(1.2)
-
-                    root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
-                    tap_or_fallback_rel(root, "next", 0.5, 0.68, "Next Button", device_serial=device_serial, instance_name=instance_name)
-                    time.sleep(1.5)
-
-                    root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
-                    hide_keyboard(device_serial=device_serial, instance_name=instance_name)
-                    tap_or_fallback_rel(root, "next", 0.5, 0.60, "Next Button", exact=True, device_serial=device_serial, instance_name=instance_name)
-                    auto_username_used = True
-                    time.sleep(1.8)
-                else:
-                    log("STATE-ACTION", "Tapping Next on Username page...", instance_name=instance_name)
-                    hide_keyboard(device_serial=device_serial, instance_name=instance_name)
-                    tap_or_fallback_rel(root, "next", 0.5, 0.60, "Next Button", exact=True, device_serial=device_serial, instance_name=instance_name)
-                    time.sleep(1.5)
 
         elif page_name == "INSTAGRAM_ALLOW_CONTINUE_PAGE":
             log("STATE-ACTION", "'Allow & Continue' screen -> Scrolling and confirming...", instance_name=instance_name)
@@ -3502,9 +2150,84 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
                     tap_or_fallback_rel(root, "i agree", 0.5, 0.81, "I Agree Button", device_serial=device_serial, instance_name=instance_name)
                 agree_terms_submitted = True
                 page_enter_time = time.time()
+
+                # Persistently wait on new page until 'Save' button is found
+                log("STATE-WAIT", "Waiting for new page & 'Save' button after 'I agree' (up to 35s)...", instance_name=instance_name)
+                save_clicked = False
+                for sec in range(1, 36):
+                    time.sleep(1.0)
+                    root_check = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
+                    if root_check is None:
+                        continue
+                    p_check, texts_check = detect_current_page(root_check)
+                    blob_check = " ".join(texts_check).lower()
+                    
+                    # Check for Save button or Save Info page
+                    btn_save = find_element(root_check, "save", exact=True) or find_element(root_check, "save")
+                    if p_check == "INSTAGRAM_SAVE_INFO_PAGE" or (btn_save and "save" in blob_check and "terms" not in blob_check):
+                        log("STATE-ACTION", f"✔ 'Save' button appeared at sec {sec}! Tapping 'Save'...", instance_name=instance_name)
+                        w_c, h_c = get_screen_dimensions(root_check)
+                        if btn_save and btn_save[1] > int(h_c * 0.50):
+                            run_adb_command(f"shell input tap {btn_save[0]} {btn_save[1]}", device_serial=device_serial, instance_name=instance_name)
+                        else:
+                            fx, fy = get_rel_coords(root_check, 0.50, 0.74)
+                            run_adb_command(f"shell input tap {fx} {fy}", device_serial=device_serial, instance_name=instance_name)
+                        time.sleep(2.0)
+
+                        if auto_username_used:
+                            log("STATE-ACTION", f"Registration complete with auto username! Opening Accounts Overview to change username to '{target_login}'...", instance_name=instance_name)
+                            update_username_in_accounts_center(device_serial=device_serial, target_username=target_login, instance_name=instance_name)
+                            auto_username_used = False
+                            time.sleep(1.0)
+
+                        save_clicked = True
+                        break
+                    elif p_check in ["INSTAGRAM_CONTINUE_PROFILE_PAGE", "REENTER_PASSWORD_PAGE", "TWO_FACTOR_CHECK_EMAIL_PAGE", "TWO_FACTOR_CHOOSE_ACCOUNT_PAGE", "TWO_FACTOR_EXTRA_PROTECTION_PAGE", "TWO_FACTOR_CHOOSE_METHOD_PAGE", "TWO_FACTOR_INSTRUCTIONS_PAGE", "TWO_FACTOR_ENTER_CODE_PAGE"]:
+                        log("STATE-PROGRESS", f"Screen advanced directly to '{p_check}'! Continuing...", instance_name=instance_name)
+                        save_clicked = True
+                        break
+                    elif p_check in ["INSTAGRAM_NOTIFICATIONS_PAGE", "INSTAGRAM_CONNECT_FB_PAGE", "INSTAGRAM_REGISTERED_PAGE"]:
+                        log("STATE-PROGRESS", f"Screen moved to '{p_check}'. Proceeding to 2FA...", instance_name=instance_name)
+                        if auto_username_used:
+                            update_username_in_accounts_center(device_serial=device_serial, target_username=target_login, instance_name=instance_name)
+                            auto_username_used = False
+                            time.sleep(1.0)
+                        save_clicked = True
+                        break
+
+                # After saving (or screen advanced), redirect to 2FA URL
+                log("2FA-START", f"Save completed! Redirecting to 2FA Settings URL: {TWO_FACTOR_URL}...", instance_name=instance_name)
+                run_adb_command(f'shell am start -a android.intent.action.VIEW -d "{TWO_FACTOR_URL}" {PACKAGE_NAME}', device_serial=device_serial, instance_name=instance_name)
+                two_factor_initiated = True
+                page_enter_time = time.time()
+                time.sleep(2.5)
+            else:
+                log("STATE-WAIT", "Waiting for Save login info screen transition...", instance_name=instance_name)
                 time.sleep(1.5)
 
-        elif page_name in ["INSTAGRAM_REGISTERED_PAGE", "INSTAGRAM_SAVE_INFO_PAGE", "INSTAGRAM_CONNECT_FB_PAGE", "INSTAGRAM_NOTIFICATIONS_PAGE"]:
+        elif page_name == "INSTAGRAM_SAVE_INFO_PAGE":
+            log("STATE-ACTION", "Save your login info screen -> Tapping 'Save' button...", instance_name=instance_name)
+            btn_save = find_element(root, "save", exact=True) or find_element(root, "save")
+            w, h = get_screen_dimensions(root)
+            if btn_save and btn_save[1] > int(h * 0.60):
+                run_adb_command(f"shell input tap {btn_save[0]} {btn_save[1]}", device_serial=device_serial, instance_name=instance_name)
+            else:
+                fx, fy = get_rel_coords(root, 0.50, 0.74)
+                run_adb_command(f"shell input tap {fx} {fy}", device_serial=device_serial, instance_name=instance_name)
+            time.sleep(1.8)
+
+            if auto_username_used:
+                log("STATE-ACTION", f"Registration complete with auto username! Opening Accounts Overview to change username to '{target_login}'...", instance_name=instance_name)
+                update_username_in_accounts_center(device_serial=device_serial, target_username=target_login, instance_name=instance_name)
+                auto_username_used = False
+                time.sleep(1.0)
+
+            log("2FA-START", f"Saved login info! Navigating directly to 2FA Settings URL: {TWO_FACTOR_URL}...", instance_name=instance_name)
+            run_adb_command(f'shell am start -a android.intent.action.VIEW -d "{TWO_FACTOR_URL}" {PACKAGE_NAME}', device_serial=device_serial, instance_name=instance_name)
+            two_factor_initiated = True
+            time.sleep(2.2)
+
+        elif page_name in ["INSTAGRAM_REGISTERED_PAGE", "INSTAGRAM_CONNECT_FB_PAGE", "INSTAGRAM_NOTIFICATIONS_PAGE"]:
             two_factor_initiated = True
             if auto_username_used:
                 log("STATE-ACTION", f"Registration complete with auto username! Opening Accounts Overview to change username to '{target_login}'...", instance_name=instance_name)
@@ -3514,6 +2237,70 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
             log("STATE-ACTION", f"Logged in successfully! Navigating to 2FA Settings URL: {TWO_FACTOR_URL}...", instance_name=instance_name)
             run_adb_command(f'shell am start -a android.intent.action.VIEW -d "{TWO_FACTOR_URL}" {PACKAGE_NAME}', device_serial=device_serial, instance_name=instance_name)
             time.sleep(2.0)
+
+        elif page_name == "INSTAGRAM_CONTINUE_PROFILE_PAGE":
+            log("STATE-ACTION", "Instagram Continue Profile screen detected -> Tapping 'Continue'...", instance_name=instance_name)
+            login_submitted = False
+            tap_or_fallback_rel(root, "continue", 0.50, 0.75, "Continue Button", exact=True, device_serial=device_serial, instance_name=instance_name)
+            time.sleep(2.5)
+
+        elif page_name == "REENTER_PASSWORD_PAGE":
+            log("STATE-ACTION", f"Password confirmation requested -> Entering password for {email}...", instance_name=instance_name)
+            pw_box = find_password_field(root) or find_input_box(root, hint_patterns=["password"], default_rx=0.50, default_ry=0.45)
+            if pw_box:
+                run_adb_command(f"shell input tap {pw_box[0]} {pw_box[1]}", device_serial=device_serial, instance_name=instance_name)
+                time.sleep(0.2)
+            clear_input_field(length=40, device_serial=device_serial, instance_name=instance_name)
+            type_text(password, device_serial=device_serial, instance_name=instance_name)
+            time.sleep(0.3)
+            hide_keyboard(device_serial=device_serial, instance_name=instance_name)
+            time.sleep(0.2)
+            root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
+            tap_or_fallback_rel(root, "continue", 0.50, 0.60, "Continue Button", exact=True, device_serial=device_serial, instance_name=instance_name) or tap_or_fallback_rel(root, "next", 0.50, 0.60, "Next Button", exact=True, device_serial=device_serial, instance_name=instance_name)
+            time.sleep(2.0)
+
+        elif page_name == "SUSPECT_AUTOMATED_BEHAVIOR_PAGE":
+            log("STATE-ACTION", "Warning: 'We suspect automated behavior on your account' -> Tapping 'Dismiss'...", instance_name=instance_name)
+            tap_or_fallback_rel(root, "dismiss", 0.50, 0.52, "Dismiss Button", exact=True, device_serial=device_serial, instance_name=instance_name)
+            time.sleep(1.5)
+            log("2FA-REDIRECT", f"Re-opening 2FA URL after dismissing warning: {TWO_FACTOR_URL}...", instance_name=instance_name)
+            run_adb_command(f'shell am start -a android.intent.action.VIEW -d "{TWO_FACTOR_URL}" {PACKAGE_NAME}', device_serial=device_serial, instance_name=instance_name)
+            two_factor_initiated = True
+            page_enter_time = time.time()
+            time.sleep(2.0)
+
+        elif page_name in ["PAGE_NOT_AVAILABLE_ERROR_PAGE", "CONTENT_NO_LONGER_AVAILABLE_PAGE", "ACCOUNT_ERROR_PAGE"]:
+            log("STATE-ACTION", f"Error screen '{page_name}' ('This page isn't available right now') -> Tapping 'Reload page' / 'OK'...", instance_name=instance_name)
+            reload_btn = (find_element(root, "reload page", exact=True)
+                          or find_element(root, "reload page")
+                          or find_element(root, "reload", exact=True)
+                          or find_element(root, "try reloading")
+                          or find_element(root, "ok", exact=True))
+            if reload_btn:
+                run_adb_command(f"shell input tap {reload_btn[0]} {reload_btn[1]}", device_serial=device_serial, instance_name=instance_name)
+            else:
+                fx, fy = get_rel_coords(root, 0.50, 0.71)
+                run_adb_command(f"shell input tap {fx} {fy}", device_serial=device_serial, instance_name=instance_name)
+            time.sleep(2.5)
+
+            # Check if dismiss / warning popup or profile continue appeared after reload
+            root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
+            post_p, _ = detect_current_page(root)
+            if post_p == "SUSPECT_AUTOMATED_BEHAVIOR_PAGE":
+                log("STATE-ACTION", "Detected 'Suspect automated behavior' after reload -> Tapping 'Dismiss'...", instance_name=instance_name)
+                tap_or_fallback_rel(root, "dismiss", 0.50, 0.52, "Dismiss Button", exact=True, device_serial=device_serial, instance_name=instance_name)
+                time.sleep(1.5)
+            elif post_p == "INSTAGRAM_CONTINUE_PROFILE_PAGE":
+                log("STATE-ACTION", "Detected Profile Continue after reload -> Tapping 'Continue'...", instance_name=instance_name)
+                tap_or_fallback_rel(root, "continue", 0.50, 0.75, "Continue Button", exact=True, device_serial=device_serial, instance_name=instance_name)
+                time.sleep(2.0)
+
+            # Re-open 2FA URL to proceed forward
+            log("2FA-REDIRECT", f"Re-opening 2FA URL to proceed forward: {TWO_FACTOR_URL}...", instance_name=instance_name)
+            run_adb_command(f'shell am start -a android.intent.action.VIEW -d "{TWO_FACTOR_URL}" {PACKAGE_NAME}', device_serial=device_serial, instance_name=instance_name)
+            two_factor_initiated = True
+            page_enter_time = time.time()
+            time.sleep(2.5)
 
         elif page_name == "TWO_FACTOR_CHOOSE_ACCOUNT_PAGE":
             two_factor_initiated = True
@@ -3536,8 +2323,8 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
             two_factor_initiated = True
             log("STATE-ACTION", f"2FA: 'Check your email' -> Fetching 8-digit security code from inbox for {email}...", instance_name=instance_name)
             email_code = fetch_email_security_code(email, password, mail_token=mail_token, max_wait_sec=90, expected_digits=8, instance_name=instance_name)
-            if not email_code:
-                log("FAILED", f"✖ Email security code not received for {email}", instance_name=instance_name)
+            if not email_code or len(str(email_code).strip()) != 8:
+                log("FAILED", f"✖ 8-digit email security code not received for {email}", instance_name=instance_name)
                 return False, ""
 
             # Check where we are currently
@@ -3555,8 +2342,9 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
                 time.sleep(2.5)
                 continue
 
-            if refreshed_page == "TWO_FACTOR_CHECK_EMAIL_PAGE":
-                log("STATE-ACTION", f"Entering 8-digit email security code '{email_code}'...", instance_name=instance_name)
+            if refreshed_page == "TWO_FACTOR_CHECK_EMAIL_PAGE" and email_code and len(str(email_code).strip()) == 8:
+                clean_email_code = str(email_code).strip()
+                log("STATE-ACTION", f"Entering verified 8-digit email security code '{clean_email_code}'...", instance_name=instance_name)
                 for attempt in range(1, 3):
                     root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
                     curr_p, _ = detect_current_page(root)
@@ -3564,24 +2352,25 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
                         log("2FA-PROGRESS", f"Moved from 'Check your email' to '{curr_p}'!", instance_name=instance_name)
                         break
 
-                    # Locate Code input field accurately
-                    elem_code_input = (find_element(root, "code", by_class="EditText")
-                                       or find_element(root, "enter code", by_class="EditText")
-                                       or find_element(root, "enter the code", by_class="EditText")
-                                       or find_password_field(root)
-                                       or find_element(root, "code"))
-                    if elem_code_input:
-                        run_adb_command(f"shell input tap {elem_code_input[0]} {elem_code_input[1]}", device_serial=device_serial, instance_name=instance_name)
+                    # Locate Code input field accurately using specialized helper
+                    code_coords = find_code_input_field(root)
+                    if code_coords:
+                        log("STATE-ACTION", f"Tapping Code input field at ({code_coords[0]}, {code_coords[1]})...", instance_name=instance_name)
+                        run_adb_command(f"shell input tap {code_coords[0]} {code_coords[1]}", device_serial=device_serial, instance_name=instance_name)
                     else:
-                        fx, fy = get_rel_coords(root, 0.50, 0.49)
+                        texts_in = extract_screen_texts(root)
+                        blob_in = " ".join(texts_in).lower()
+                        if "facebook" in blob_in or "enter code" in blob_in:
+                            fx, fy = get_rel_coords(root, 0.50, 0.66)
+                        else:
+                            fx, fy = get_rel_coords(root, 0.50, 0.48)
                         run_adb_command(f"shell input tap {fx} {fy}", device_serial=device_serial, instance_name=instance_name)
                     
                     time.sleep(0.3)
                     clear_input_field(length=20, device_serial=device_serial, instance_name=instance_name)
                     time.sleep(0.2)
                     
-                    # Human-like keystroke delay to prevent dropping digits
-                    type_text(email_code, device_serial=device_serial, instance_name=instance_name, human_like=True, min_delay=0.03, max_delay=0.07)
+                    type_text(clean_email_code, device_serial=device_serial, instance_name=instance_name, human_like=True, min_delay=0.03, max_delay=0.07)
                     time.sleep(0.3)
                     
                     hide_keyboard(device_serial=device_serial, instance_name=instance_name)
@@ -3596,18 +2385,34 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
                     if btn_found:
                         run_adb_command(f"shell input tap {btn_found[0]} {btn_found[1]}", device_serial=device_serial, instance_name=instance_name)
                     else:
-                        fx, fy = get_rel_coords(root, 0.50, 0.65)
+                        texts_btn = extract_screen_texts(root)
+                        blob_btn = " ".join(texts_btn).lower()
+                        if "facebook" in blob_btn or "enter code" in blob_btn:
+                            fx, fy = get_rel_coords(root, 0.50, 0.86)
+                        else:
+                            fx, fy = get_rel_coords(root, 0.50, 0.65)
                         run_adb_command(f"shell input tap {fx} {fy}", device_serial=device_serial, instance_name=instance_name)
 
-                    time.sleep(2.0)
+                    time.sleep(2.5)
                     root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
                     post_p, _ = detect_current_page(root)
                     if post_p != "TWO_FACTOR_CHECK_EMAIL_PAGE":
-                        log("2FA-ACTION", f"Successfully moved to '{post_p}'!", instance_name=instance_name)
+                        log("2FA-ACTION", f"Successfully moved to '{post_p}' after email verification!", instance_name=instance_name)
+                        
+                        # Re-open 2FA URL to resume setup if not already on 2FA flow screen
+                        if post_p not in ["TWO_FACTOR_CHOOSE_ACCOUNT_PAGE", "TWO_FACTOR_EXTRA_PROTECTION_PAGE", "TWO_FACTOR_CHOOSE_METHOD_PAGE", "TWO_FACTOR_INSTRUCTIONS_PAGE", "TWO_FACTOR_COPY_KEY_PAGE", "TWO_FACTOR_ENTER_CODE_PAGE", "TWO_FACTOR_SUCCESS_PAGE"]:
+                            log("2FA-REDIRECT", f"Redirecting back to 2FA URL to complete remaining setup: {TWO_FACTOR_URL}...", instance_name=instance_name)
+                            run_adb_command(f'shell am start -a android.intent.action.VIEW -d "{TWO_FACTOR_URL}" {PACKAGE_NAME}', device_serial=device_serial, instance_name=instance_name)
+                            time.sleep(2.2)
                         break
                     else:
                         log("2FA-WARN", "Still on 'Check your email'. Retrying Continue tap...", instance_name=instance_name)
-                        fx, fy = get_rel_coords(root, 0.50, 0.65)
+                        texts_btn = extract_screen_texts(root)
+                        blob_btn = " ".join(texts_btn).lower()
+                        if "facebook" in blob_btn or "enter code" in blob_btn:
+                            fx, fy = get_rel_coords(root, 0.50, 0.86)
+                        else:
+                            fx, fy = get_rel_coords(root, 0.50, 0.65)
                         run_adb_command(f"shell input tap {fx} {fy}", device_serial=device_serial, instance_name=instance_name)
                         time.sleep(1.5)
 
@@ -3619,32 +2424,44 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
             tap_or_fallback_rel(root, "continue", 0.50, 0.86, "Continue Button", exact=True, device_serial=device_serial, instance_name=instance_name)
             time.sleep(1.6)
 
-        elif page_name == "TWO_FACTOR_INSTRUCTIONS_PAGE":
+        elif page_name in ["TWO_FACTOR_INSTRUCTIONS_PAGE", "TWO_FACTOR_COPY_KEY_PAGE"]:
             two_factor_initiated = True
-            log("STATE-ACTION", "2FA: 'Instructions for setup' -> Scrolling down to reveal key & extracting...", instance_name=instance_name)
+            log("STATE-ACTION", f"2FA: Setup screen ({page_name}) -> Scrolling and extracting secret key...", instance_name=instance_name)
+            
+            # Robust key extraction (up to 4 attempts)
+            for attempt in range(1, 4):
+                root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
+                extracted_key = extract_2fa_secret_and_copy(root, device_serial=device_serial, instance_name=instance_name)
+                if extracted_key:
+                    two_factor_secret = extracted_key
+                    if task_context is not None:
+                        task_context['two_fa_key'] = two_factor_secret
+                    log("2FA-CAPTURED", f"✔ Secret Key captured: '{two_factor_secret}'", instance_name=instance_name)
+                    break
+                else:
+                    clip = get_android_clipboard(device_serial=device_serial, instance_name=instance_name)
+                    if clip:
+                        clean_clip = re.sub(r'[^A-Z0-9]', '', clip.upper())
+                        if len(clean_clip) >= 16 and not clean_clip.isdigit():
+                            two_factor_secret = clean_clip
+                            if task_context is not None:
+                                task_context['two_fa_key'] = two_factor_secret
+                            log("2FA-CLIPBOARD", f"✔ Secret Key recovered from clipboard: '{two_factor_secret}'", instance_name=instance_name)
+                            break
+                log("2FA-WARN", f"Key not captured on attempt {attempt}/3. Scrolling down and retrying...", instance_name=instance_name)
+                w, h = get_screen_dimensions(root)
+                run_adb_command(f"shell input swipe {int(w*0.50)} {int(h*0.70)} {int(w*0.50)} {int(h*0.35)} 250", device_serial=device_serial, instance_name=instance_name)
+                time.sleep(1.0)
+
+            # If key is not yet captured, do not proceed to Enter Code page yet; continue to give it chance to extract
+            if not two_factor_secret:
+                log("2FA-WARN", "Secret key not captured yet. Staying on key page to retry in next loop...", instance_name=instance_name)
+                time.sleep(1.2)
+                continue
+
+            # Now that we have the 2FA secret, scroll to reveal 'Next' / 'Enter code' button and tap
             w, h = get_screen_dimensions(root)
-
-            run_adb_command(f"shell input swipe {int(w*0.50)} {int(h*0.70)} {int(w*0.50)} {int(h*0.35)} 250",
-                            device_serial=device_serial, instance_name=instance_name)
-            time.sleep(0.6)
-
-            root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
-            extracted_key = extract_2fa_secret_and_copy(root, device_serial=device_serial, instance_name=instance_name)
-            if extracted_key:
-                two_factor_secret = extracted_key
-                if task_context is not None: task_context['two_fa_key'] = two_factor_secret
-                log("2FA-CAPTURED", f"Secret Key: '{two_factor_secret}'", instance_name=instance_name)
-            else:
-                clip = get_android_clipboard(device_serial=device_serial, instance_name=instance_name)
-                if clip:
-                    clean_clip = re.sub(r'[^A-Z0-9]', '', clip.upper())
-                    if len(clean_clip) >= 16 and not clean_clip.isdigit():
-                        two_factor_secret = clean_clip
-                        if task_context is not None: task_context['two_fa_key'] = two_factor_secret
-                        log("2FA-CLIPBOARD", f"Secret Key recovered from clipboard: '{two_factor_secret}'", instance_name=instance_name)
-
-            run_adb_command(f"shell input swipe {int(w*0.50)} {int(h*0.40)} {int(w*0.50)} {int(h*0.65)} 200",
-                            device_serial=device_serial, instance_name=instance_name)
+            run_adb_command(f"shell input swipe {int(w*0.50)} {int(h*0.40)} {int(w*0.50)} {int(h*0.65)} 200", device_serial=device_serial, instance_name=instance_name)
             time.sleep(0.4)
 
             root = get_screen_hierarchy(device_serial=device_serial, instance_name=instance_name)
@@ -3681,7 +2498,6 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
             time.sleep(0.3)
             clear_input_field(device_serial=device_serial, instance_name=instance_name)
 
-            # Generate OTP immediately using pyotp from 2FA Secret Key
             otp_to_fill = ""
             if two_factor_secret:
                 otp_to_fill = generate_totp_code(two_factor_secret)
@@ -3701,7 +2517,6 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
             log("2FA-ACTION", f"✔ Clicked 'Next' button after OTP input ({clicked_next}). Waiting 2.0s...", instance_name=instance_name)
             time.sleep(2.0)
 
-            # Per requirement: As soon as Next is clicked and 2s waited, consider 2FA setup successful!
             log("SUCCESS", f"✔ Instagram 2FA Setup Completed for {captured_username}! (Secret: {two_factor_secret})", instance_name=instance_name)
             save_credentials_csv(email, password, two_factor_secret, username=captured_username, instance_name=instance_name)
             return True, two_factor_secret
@@ -3717,11 +2532,9 @@ def run_instagram_2fa_pipeline(device_serial: str, email: str, password: str, ta
     return False, ""
 
 
-
 # ==============================================================================
 # MULTI-ACCOUNT TASKLY WORKER CLASS
 # ==============================================================================
-# Shared Telegram Client Cache by session name
 CLIENT_CACHE = {}
 
 class TasklyWorker:
@@ -3754,7 +2567,6 @@ class TasklyWorker:
             self.client = TelegramClient(self.session_name, self.api_id, self.api_hash)
             CLIENT_CACHE[self.session_name] = self.client
         
-        # Isolated state per worker
         self.current_task = {
             'first_name': None,
             'last_name': None,
@@ -3888,7 +2700,6 @@ class TasklyWorker:
             recent_msgs = await self.client.get_messages(self.target_bot, limit=2)
             for msg in recent_msgs:
                 if msg.buttons:
-                    # Guard: verify message is recent to avoid clicking ancient expired buttons
                     msg_age = (datetime.now(timezone.utc) - msg.date).total_seconds() if msg.date else 0
                     if msg_age > 180:
                         continue
@@ -3925,7 +2736,6 @@ class TasklyWorker:
         if msg.buttons:
             self.task_confirm_btn_msg = msg
 
-        # Identify which bot sent this message
         try:
             sender = await event.get_sender()
             sender_bot = (getattr(sender, 'username', '') or "").lstrip("@")
@@ -3983,7 +2793,7 @@ class TasklyWorker:
                     log("TG-STEP", "Sending task selection message fallback...", instance_name=self.instance_name)
                     await self.safe_send_message(self.target_bot, "🔥Create Inst (2FA) ($0.0250)")
 
-        # 3. Start task (Trigger ▶️ Start to receive credentials)
+        # 3. Start task
         elif "Review time" in text or "Task: 🔥Create Inst" in text or "Task: 📱 Create Inst" in text or "Create Inst (2FA)" in text or "Task:" in text:
             if self.current_task.get('status') in ('running', 'credentials_ready'):
                 return
@@ -3994,15 +2804,14 @@ class TasklyWorker:
                 log("TG-STEP", "Inline button not clicked. Sending '▶️ Start' message fallback to bot...", instance_name=self.instance_name)
                 await self.safe_send_message(self.target_bot, "▶️ Start")
 
-        # 4. Account Credentials Received (First name, Login, Password)
+        # 4. Account Credentials Received
         elif re.search(r"First\s*name\s*:", text, re.IGNORECASE) and re.search(r"Login\s*:", text, re.IGNORECASE):
-            log("TG-STEP", "Account Credentials Received from Bot! Triggering Meta AI creation...", instance_name=self.instance_name)
+            log("TG-STEP", "Account Credentials Received from Bot! Triggering pure API Meta creation...", instance_name=self.instance_name)
             fn_match = re.search(r"First\s*name\s*:\s*([^\r\n]+)", text, re.IGNORECASE)
             login_match = re.search(r"Login\s*:\s*([^\r\n]+)", text, re.IGNORECASE)
             pass_match = re.search(r"Password\s*:\s*([^\r\n]+)", text, re.IGNORECASE)
             
             raw_full_name = fn_match.group(1).strip().replace("`", "").replace("*", "").strip() if fn_match else "User"
-            # Strip emojis or symbols so Meta AI form accepts the name smoothly
             clean_name = re.sub(r'[^\w\s]', '', raw_full_name).strip()
             full_name = clean_name if clean_name else (raw_full_name or "User")
             name_parts = full_name.split()
@@ -4035,7 +2844,7 @@ class TasklyWorker:
                     await asyncio.sleep(DELAY_BETWEEN_STEPS)
                     await self.click_any_button(msg, r"Get code|📥")
 
-        # 5. Bot asks for 2FA key ("Please enter your 2FA key to get the code:")
+        # 5. Bot asks for 2FA key
         elif "2FA key" in text or "enter your 2FA" in text:
             log("TG-STEP", "Bot is requesting 2FA Secret Key...", instance_name=self.instance_name)
             self.two_fa_requested_event.set()
@@ -4052,13 +2861,13 @@ class TasklyWorker:
             if msg.buttons:
                 self.task_confirm_btn_msg = msg
 
-        # 7a. Report Received / Submitted ("✅ Your report has been received! Please wait.")
+        # 7a. Report Received / Submitted
         elif "report has been received" in text.lower() or "report received" in text.lower() or "your report has been received" in text.lower() or "Task Completed" in text:
             self.submitted_count += 1
             log("TG-SUBMITTED", f"📥 [SUBMITTED] Report received by Bot! (Total Submitted: {self.submitted_count})", instance_name=self.instance_name)
             self.report_received_event.set()
 
-        # 7b. Report Approved ("✅ Report approved, +$0.03")
+        # 7b. Report Approved
         elif "report approved" in text.lower() or "+$0.03" in text or "approved, +" in text.lower() or "credited to your balance" in text:
             self.approved_count += 1
             log("TG-APPROVED", f"💰 [APPROVED] Report approved (+$0.03)! (Total Approved: {self.approved_count})", instance_name=self.instance_name)
@@ -4079,7 +2888,7 @@ class TasklyWorker:
                 log("TG-RATE-LIMIT", "Resuming after rate limit pause. Sending /start...", instance_name=self.instance_name)
                 await self.safe_send_message(self.target_bot, "/start")
 
-        # 8b. Action Cancelled / Conversation Reset Handler (debounced)
+        # 8b. Action Cancelled / Conversation Reset Handler
         elif "previous conversation was reset" in text.lower() or "conversation was reset" in text.lower() or "action cancelled" in text.lower() or "action canceled" in text.lower():
             if self.current_task.get('status') in ('credentials_ready', 'running') or self.current_task.get('login'):
                 return
@@ -4135,7 +2944,7 @@ class TasklyWorker:
         elif msg.buttons:
             self.task_confirm_btn_msg = msg
 
-    async def run_automation_loop(self, playwright: Playwright):
+    async def run_automation_loop(self):
         cycle_num = 0
         while not self.is_stopped:
             try:
@@ -4143,7 +2952,7 @@ class TasklyWorker:
                     break
                 cycle_num += 1
                 print("\n" + "#"*60)
-                log("CYCLE-START", f"Starting Taskly-to-Meta-to-Instagram Cycle #{cycle_num} on device {self.device_serial}...", instance_name=self.instance_name)
+                log("CYCLE-START", f"Starting Taskly-to-MetaAPI-to-Instagram Cycle #{cycle_num} on device {self.device_serial}...", instance_name=self.instance_name)
                 print("#"*60 + "\n")
 
                 if self.current_task.get('status') == 'credentials_ready' and self.current_task.get('login'):
@@ -4157,7 +2966,6 @@ class TasklyWorker:
                     self.current_task['cancelled'] = False
 
                     if cycle_num == 1:
-                        # Grab initial balance once on boot
                         try:
                             await self.fetch_bot_balance()
                             await asyncio.sleep(0.8)
@@ -4179,7 +2987,6 @@ class TasklyWorker:
                         await asyncio.sleep(3.0)
                         continue
 
-                # CRITICAL GUARD: Only abort if we DO NOT have valid credentials
                 if not self.current_task.get('login'):
                     if self.task_cancelled_event.is_set() or self.current_task.get('status') == 'cancelled':
                         log("CYCLE-ABORT", "Task was cancelled by bot. Starting fresh task from beginning...", instance_name=self.instance_name)
@@ -4188,7 +2995,6 @@ class TasklyWorker:
                         await asyncio.sleep(3.0)
                         continue
                 else:
-                    # Valid credentials acquired: clear any cancel flags
                     self.task_cancelled_event.clear()
 
                 self.current_task['status'] = 'running'
@@ -4197,10 +3003,9 @@ class TasklyWorker:
                 target_login = self.current_task['login']
                 target_password = self.current_task['password']
 
-                # Step 2: Create Meta AI Account
-                log("STEP-2", f"Creating Meta AI account for: {first_name} {last_name} (User: {target_login}) | Password: {target_password}...", instance_name=self.instance_name)
+                # Step 2: Create Meta AI Account 100% via API (No browser needed!)
+                log("STEP-2", f"Creating Meta AI account (Pure API) for: {first_name} {last_name} (User: {target_login}) | Password: {target_password}...", instance_name=self.instance_name)
                 meta_ok, meta_email, meta_mail_token = await create_meta_account_task(
-                    playwright,
                     first_name,
                     last_name,
                     target_password,
@@ -4224,7 +3029,7 @@ class TasklyWorker:
                     await asyncio.sleep(4.0)
                     continue
 
-                # Step 3: Run Instagram 2FA Creation in Thread
+                # Step 3: Run Instagram 2FA Creation on Emulator
                 log("STEP-3", f"Running Instagram 2FA on emulator ({self.device_serial}) with Meta email: {meta_email} and Username: {target_login}...", instance_name=self.instance_name)
                 loop = asyncio.get_running_loop()
                 
@@ -4276,7 +3081,6 @@ class TasklyWorker:
                 final_2fa_key = secret_key or self.current_task.get('two_fa_key')
 
                 if insta_ok and final_2fa_key and len(final_2fa_key) >= 16:
-                    # Guarantee 2FA secret key was submitted to Telegram bot
                     if not self.current_task.get('two_fa_sent'):
                         log("TG-BOT", f"🔑 Submitting captured 2FA Secret Key '{final_2fa_key}' to @{self.target_bot}...", instance_name=self.instance_name)
                         await self.safe_send_message(self.target_bot, final_2fa_key)
@@ -4287,7 +3091,6 @@ class TasklyWorker:
                     self.report_received_event.clear()
                     await asyncio.sleep(DELAY_BETWEEN_STEPS)
 
-                    # Click '✅ Account Registered' button (using robust button search & fallback)
                     attempt = 0
                     max_confirm_attempts = 4
                     while not self.report_received_event.is_set() and attempt < max_confirm_attempts:
@@ -4326,7 +3129,6 @@ class TasklyWorker:
                     self.current_task['two_fa_sent'] = False
                     self.current_task['otp_code'] = None
 
-                    # Post-Cycle: Update balance smoothly with the newly added reward
                     try:
                         await asyncio.sleep(1.0)
                         await self.fetch_bot_balance()
@@ -4360,12 +3162,12 @@ class TasklyWorker:
                     pass
                 await asyncio.sleep(5.0)
 
-    async def run(self, playwright: Playwright):
+    async def run(self):
         while not self.is_stopped:
             try:
                 if self.is_stopped:
                     break
-                await self.run_automation_loop(playwright)
+                await self.run_automation_loop()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -4379,15 +3181,20 @@ class TasklyWorker:
 # MAIN ASYNC ENTRYPOINT (PARALLEL EXECUTION ACROSS BOTS & DEVICES)
 # ==============================================================================
 async def main_async():
+    cfg = load_config()
+    emu_cfg = cfg.get("emulators", DEFAULT_EMULATOR_CONFIG)
+    active_filters = [f"{k.upper()}: {'ON' if emu_cfg.get(k, False) else 'OFF'}" for k in ["ldplayer", "mumu", "nox", "memu"]]
+    log("INIT", f"📱 Emulator Selection Filters -> {' | '.join(active_filters)}")
+
     devices = get_unique_devices()
     if not devices:
-        log("ERR", "No active ADB emulator device found! Please start LDPlayer/emulator.")
+        log("ERR", f"No active matching emulator device found for enabled filters ({', '.join([k for k in ['ldplayer', 'mumu', 'nox', 'memu'] if emu_cfg.get(k, False)])})! Please launch emulator.")
         return
 
-    log("INIT", f"Detected {len(devices)} active ADB device(s): {', '.join(devices)}")
+    dev_descs = [f"{d} ({detect_device_emulator_type(d)})" for d in devices]
+    log("INIT", f"Detected {len(devices)} matching active ADB device(s): {', '.join(dev_descs)}")
     log("INIT", f"Configured {len(TELEGRAM_ACCOUNTS)} Telegram account(s)")
 
-    # Build unique parallel jobs list: 1 distinct account per worker/device
     jobs = []
     for acc in TELEGRAM_ACCOUNTS:
         acc_bots = acc.get("target_bots") or acc.get("target_bot") or TARGET_BOTS
@@ -4399,7 +3206,7 @@ async def main_async():
     if num_to_run < len(devices):
         log("WARN", f"Found {len(devices)} device(s) but only {len(jobs)} unique Telegram account(s). Running {num_to_run} worker(s).")
 
-    # 1. Connect unique Telegram clients sequentially first
+    # Connect Telegram clients
     unique_clients = {}
     for i in range(num_to_run):
         job = jobs[i]
@@ -4432,15 +3239,13 @@ async def main_async():
         workers.append(worker)
         log("INIT", f"🚀 Worker [{inst_name}] assigned to bot @{target_bot} on device {dev}")
 
-    # 2. Run all workers concurrently in parallel
     log("INIT", f"🔥 Launching {len(workers)} worker(s) simultaneously in PARALLEL...")
     
     # Run Telegram listener background tasks for all unique clients
     tg_listeners = [asyncio.create_task(client.run_until_disconnected()) for client in CLIENT_CACHE.values()]
     
-    async with async_playwright() as playwright:
-        worker_tasks = [asyncio.create_task(worker.run(playwright)) for worker in workers]
-        await asyncio.gather(*worker_tasks, return_exceptions=True)
+    worker_tasks = [asyncio.create_task(worker.run()) for worker in workers]
+    await asyncio.gather(*worker_tasks, return_exceptions=True)
 
 def main():
     try:

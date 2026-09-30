@@ -1,0 +1,101 @@
+{
+    "num_workers": 1,
+    "task_mode": "custom-2fa",
+    "browser_channel": "chrome",
+    "headless": true,
+    "viewport_width": 500,
+    "viewport_height": 700,
+    "email_services": {
+        "ninja": true,
+        "mail_td": false,
+        "mail_cx": false
+    },
+    "telegram": {
+        "target_bot": [
+            "PayGoeasy_bot",
+            "tasklyBux_bot"
+        ],
+        "auto_repeat_tasks": true,
+        "delay_between_steps": 2,
+        "accounts": [
+            {
+                "phone": "+8801648266488",
+                "api_id": 37965026,
+                "api_hash": "24ccd7aff0fbf93babff9bd12eadb6bb",
+                "target_bot": [
+                    "PayGoeasy_bot",
+                    "tasklyBux_bot"
+                ],
+                "session_name": "taskly_session_8801648266488"
+            },
+            {
+                "phone": "+8801580861138",
+                "api_id": 30276249,
+                "api_hash": "053b4de80192025a3089b0af9abbcb66",
+                "target_bot": [
+                    "PayGoeasy_bot",
+                    "tasklyBux_bot"
+                ],
+                "session_name": "taskly_session_8801580861138"
+            },
+            {
+                "phone": "+8801789237910",
+                "api_id": 20602218,
+                "api_hash": "ea359e35ec21d96c243bc87c673283f9",
+                "target_bot": [
+                    "PayGoeasy_bot",
+                    "tasklyBux_bot"
+                ],
+                "session_name": "taskly_session_8801789237910"
+            },
+            {
+                "phone": "+8801568690722",
+                "api_id": 30026453,
+                "api_hash": "8e5e438b759599cd6d35717a96a5c009",
+                "target_bot": [
+                    "PayGoeasy_bot",
+                    "tasklyBux_bot"
+                ],
+                "session_name": "taskly_session_8801568690722"
+            },
+            {
+                "phone": "+8801970429988",
+                "api_id": 31977748,
+                "api_hash": "f884c9f3d1762441b8d8f89a980ee2d6",
+                "target_bot": [
+                    "PayGoeasy_bot",
+                    "tasklyBux_bot"
+                ],
+                "session_name": "taskly_session_8801970429988"
+            }
+        ]
+    },
+    "password_config": {
+        "prefix": "Mannik@",
+        "random_chars_length": 0,
+        "include_today_date": true
+    },
+    "google_sheet": {
+        "enabled": true,
+        "service_account_file": "service_account.json",
+        "spreadsheet_id": "1on4mw8b_71zOzh4gu5k6lYNf4MiNzD2lRGBdP9pnc9U",
+        "spreadsheet_url": "https://docs.google.com/spreadsheets/d/1on4mw8b_71zOzh4gu5k6lYNf4MiNzD2lRGBdP9pnc9U",
+        "google_sheet_webhook_url": "https://script.google.com/macros/s/AKfycby0FMC_Y4T_vGeWOsKRwbmKg6RBIHFOxqNhIaqgjrTDhpmgTyAkOmX-noCmo3TEIPSr/exec",
+        "input_sheet_name": "Sheet1",
+        "done_sheet_name": "Sheet2"
+    },
+    "captcha": {
+        "provider": "2captcha",
+        "api_key": "1d0543cab02e928f092f4f24736efd85",
+        "site_key": "6LdktRgnAAAAAFQ6icovYI2-masYLFjEFyzQzpix",
+        "timeout": 120
+    },
+    "emulators": {
+        "ldplayer": true,
+        "mumu": true,
+        "nox": false,
+        "memu": false,
+        "custom_ports": [],
+        "custom_devices": []
+    }
+}
